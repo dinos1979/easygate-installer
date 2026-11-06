@@ -11,19 +11,20 @@
 #
 # Usage (as root):
 #   sudo bash easygate-gateway-setup.sh \
-#        --server <server public IP or DNS> \
 #        --server-pubkey <server WireGuard public key for this customer> \
-#        [--tenant 1] [--port 51001] \
+#        [--server easygate.easytech.com.cy] [--tenant 1] [--port 51001] \
 #        [--approved "192.168.1.0/24 10.10.0.0/16"] \
 #        [--mgmt-from "10.0.0.0/24"] [--hostname easygate-gw-cust1] \
 #        [--no-mgmt-ssh]
 # =============================================================================
 set -euo pipefail
+VERSION="0.1.1"
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
 PORT=""
-SERVER=""
+SERVER="easygate.easytech.com.cy"
+SERVER_ADDR=""
 SERVER_PUBKEY=""
 APPROVED=""
 MGMT_FROM=""
@@ -57,6 +58,7 @@ done
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo bash $0 ...)"
 [[ -n "$SERVER" && -n "$SERVER_PUBKEY" ]] || usage
+log "easygate-gateway-setup v${VERSION}"
 
 # ---- Validation -------------------------------------------------------------
 is_cidr() {
@@ -74,6 +76,10 @@ in_net() {  # in_net <ip> <cidr>
 [[ -n "$PORT" ]] || PORT=$((51000 + TENANT_ID))
 [[ "$PORT" =~ ^[0-9]{4,5}$ ]] && (( PORT >= 1024 && PORT <= 65535 )) || die "--port invalid"
 [[ "$SERVER" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || die "--server must be an IPv4 address or DNS name"
+if [[ ! "$SERVER" =~ ^[0-9.]+$ ]]; then
+  SERVER_ADDR=$(getent ahostsv4 "$SERVER" | awk 'NR==1{print $1}')
+  [[ -n "$SERVER_ADDR" ]] || die "cannot resolve $SERVER - check DNS (the name needs an A record)"
+fi
 [[ "$SERVER_PUBKEY" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$ ]] || die "--server-pubkey is not a WireGuard public key"
 [[ -z "$NEW_HOSTNAME" || "$NEW_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "--hostname invalid"
 command -v python3 >/dev/null || die "python3 is required (installed by default on Ubuntu Server)"
@@ -113,7 +119,7 @@ if [[ -n "${SSH_CONNECTION:-}" ]]; then
 fi
 
 log "Interface:        $LAN_IF ($GW_IP, LAN $LAN_NET, router $DEF_ROUTER)"
-log "Server endpoint:  $SERVER:$PORT  (tenant $TENANT_ID, tunnel $GW_TUN -> $SERVER_TUN)"
+log "Server endpoint:  $SERVER:$PORT ${SERVER_ADDR:+($SERVER_ADDR) }(tenant $TENANT_ID, tunnel $GW_TUN -> $SERVER_TUN)"
 log "Approved subnets: $APPROVED"
 log "Local management: $MGMT_SRCS"
 log "Mgmt SSH via VPN: $MGMT_SSH"
@@ -257,10 +263,66 @@ EOF
 sshd -t || { rm -f /etc/ssh/sshd_config.d/80-easygate.conf; die "sshd config invalid - reverted"; }
 systemctl restart ssh
 
-# ---- 8. Start tunnel --------------------------------------------------------
+# ---- 8. Resilience: boot retry + DNS re-resolve -----------------------------
+# wg-quick resolves the server name only once. If DNS is not ready at boot it fails,
+# and if the server IP changes later the tunnel would stay on the old address.
+install -d /etc/systemd/system/wg-quick@wg0.service.d
+install -m 644 /dev/stdin /etc/systemd/system/wg-quick@wg0.service.d/easygate.conf <<'EOF'
+[Unit]
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Restart=on-failure
+RestartSec=30
+EOF
+
+install -m 755 /dev/stdin /usr/local/sbin/easygate-reresolve <<'EOF'
+#!/usr/bin/env bash
+# Re-resolve the server endpoint when the handshake is stale (> 135 s), e.g. after a server IP change.
+set -euo pipefail
+IF=wg0; CONF=/etc/wireguard/wg0.conf
+ip link show "$IF" >/dev/null 2>&1 || exit 0
+# (keys end in '=', so strip the "Name = " prefix instead of splitting on '=')
+PEER=$(awk '/^PublicKey[ \t]*=/{sub(/^PublicKey[ \t]*=[ \t]*/,""); print; exit}' "$CONF")
+ENDPOINT=$(awk '/^Endpoint[ \t]*=/{sub(/^Endpoint[ \t]*=[ \t]*/,""); print; exit}' "$CONF")
+[[ -n "$PEER" && -n "$ENDPOINT" ]] || exit 0
+LAST=$(wg show "$IF" latest-handshakes | awk -v p="$PEER" '$1==p{print $2}')
+NOW=$(date +%s)
+if [[ -z "$LAST" || "$LAST" -eq 0 || $((NOW - LAST)) -gt 135 ]]; then
+  wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" && logger -t easygate "re-resolved endpoint $ENDPOINT"
+fi
+EOF
+
+install -m 644 /dev/stdin /etc/systemd/system/easygate-reresolve.service <<'EOF'
+[Unit]
+Description=EasyGate - re-resolve VPN server endpoint
+After=wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/easygate-reresolve
+EOF
+
+install -m 644 /dev/stdin /etc/systemd/system/easygate-reresolve.timer <<'EOF'
+[Unit]
+Description=EasyGate - re-resolve VPN server endpoint every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+
+# ---- 9. Start tunnel --------------------------------------------------------
 log "Starting tunnel..."
 systemctl enable wg-quick@wg0 >/dev/null 2>&1
 systemctl restart wg-quick@wg0
+systemctl enable --now easygate-reresolve.timer >/dev/null 2>&1
 
 PUBLIC_IP=$(curl -4 -s --max-time 8 https://api.ipify.org || true)
 
@@ -268,7 +330,7 @@ PUBLIC_IP=$(curl -4 -s --max-time 8 https://api.ipify.org || true)
 cat <<EOF
 
 =====================================================================
- EasyGate gateway configured  ($(hostname), $(date '+%Y-%m-%d %H:%M'))
+ EasyGate gateway configured  v${VERSION}  ($(hostname), $(date '+%Y-%m-%d %H:%M'))
 =====================================================================
  Gateway LAN:          $LAN_IF  $GW_IP  ($LAN_NET via $DEF_ROUTER)
  Tunnel:               $GW_TUN -> $SERVER_TUN  ($SERVER:$PORT)
