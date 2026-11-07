@@ -35,10 +35,34 @@ Options:
 At the end the script prints the **gateway public key** and the **site public IP**;
 send both to EasyTech so the server can accept the connection.
 
+## Remove a gateway (or start over)
+
+`easygate-gateway-remove.sh` undoes the installer: it deletes the tunnel and its keys
+(`/etc/wireguard`), the EasyGate firewall/NAT rules (the earlier firewall is restored),
+IP forwarding, the EasyGate SSH rules, the `easyadmin` account and the WireGuard package.
+The hostname, network settings and other users are not touched.
+
+Run it on the gateway console or over SSH from the LAN (not over the tunnel), logged in
+with the site's own admin account:
+
+```bash
+VER=v0.1.2
+curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-remove.sh"
+sha256sum easygate-gateway-remove.sh       # must match the published hash for ${VER}
+sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
+```
+
+Options: `--yes` (no confirmation), `--keep-user` (keep the `easyadmin` account),
+`--keep-packages` (keep `wireguard-tools`).
+
+To **start over**, run the installer again afterwards. It creates a new gateway key, so send
+the new gateway public key to EasyTech.
+
 ## Versions
 
-| Version | SHA-256 of `easygate-gateway-setup.sh` |
+| Version | SHA-256 |
 |---|---|
+| v0.1.2 | `easygate-gateway-setup.sh` unchanged from v0.1.1 (`463ed4fd…f830`)<br>`easygate-gateway-remove.sh` `4cd6a2cbd6c959d9111c630ae2fb0a40b43cc7d2662e139b918f638442060e57` — new: removes the gateway configuration |
 | v0.1.1 | `463ed4fd28086512cc3402df2cf7872c5ddec71c77fa7f27a0fa497eb6a1f830` — default server `easygate.easytech.com.cy`, boot retry, DNS re-resolve |
 | v0.1.0 | `bf23080d8cd9d55c7451c9498ede680bf65e7359992da6fe7c569c8810b652a7` — initial (superseded) |
 
