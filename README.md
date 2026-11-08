@@ -10,7 +10,7 @@ Always download a **tagged version** and check its SHA-256 against the value you
 from EasyTech before running it.
 
 ```bash
-VER=v0.2.3
+VER=v0.2.4
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-setup.sh"
 sha256sum easygate-gateway-setup.sh        # must match the published hash for ${VER}
 sudo bash easygate-gateway-setup.sh \
@@ -29,15 +29,15 @@ Options:
 |---|---|---|
 | `--server` | EasyGate server DNS name or public IP | `easygate.easytech.com.cy` |
 | `--server-pubkey` | Server WireGuard public key for this customer | required |
-| `--tenant` | Customer number (1–254) | `1` |
+| `--tenant` | Customer number (1â€“254) | `1` |
 | `--port` | Server UDP port | `51000 + tenant` |
 | `--approved "a/b c/d"` | Customer subnets the server may reach | the gateway's LAN subnet |
-| `--mgmt-from "a/b"` | Extra subnets allowed to manage the gateway locally | — |
+| `--mgmt-from "a/b"` | Extra subnets allowed to manage the gateway locally | â€” |
 | `--hostname` | Set the gateway hostname | unchanged |
-| `--admin-key "ssh-ed25519 …"` | Public key allowed to manage the gateway over the VPN (the EasyGate portal's key); repeatable | required unless `--no-mgmt-ssh` |
+| `--admin-key "ssh-ed25519 â€¦"` | Public key allowed to manage the gateway over the VPN (the EasyGate portal's key); repeatable | required unless `--no-mgmt-ssh` |
 | `--no-mgmt-ssh` | Disable management SSH over the VPN | enabled |
 
-At the end the script prints an **enrollment code** (`EG1.…`). Paste it into the EasyGate
+At the end the script prints an **enrollment code** (`EG1.â€¦`). Paste it into the EasyGate
 portal: it carries the gateway public key, the site public IP, the LAN and the gateway's SSH
 host key (which the portal pins, so it only ever talks to this gateway). The code contains no
 secrets. A checksum at the end rejects a mistyped or incomplete code.
@@ -53,7 +53,7 @@ Run it on the gateway console or over SSH from the LAN (not over the tunnel), lo
 with the site's own admin account:
 
 ```bash
-VER=v0.2.3
+VER=v0.2.4
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-remove.sh"
 sha256sum easygate-gateway-remove.sh       # must match the published hash for ${VER}
 sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
@@ -69,13 +69,14 @@ the new enrollment code into the portal.
 
 | Version | SHA-256 |
 |---|---|
-| v0.2.3 | `easygate-gateway-setup.sh` `aa0feb4a0c611e88e7297beb971d662aa9fcc6be4bc3ac86f3c0d5f09c40e3a1`<br>`easygate-gateway-remove.sh` `6d1549cdd466f0ee08b9c5e165ff01323b765df525dbc12eb47c354230da6371` — fix: no file is written with `install /dev/stdin` any more (fails with the Rust coreutils on current Ubuntu 26.04: "install: No such file or directory"). v0.2.0–v0.2.2 are affected; use v0.2.3 |
-| v0.2.2 | `easygate-gateway-setup.sh` `31e579be32dab779c00b6c9062c151afab20102f3c759cacb0e5efef5ecd78db` — fix: v0.2.0/v0.2.1 stopped with "install: No such file or directory" on some Ubuntu 26.04 systems before printing the enrollment code<br>`easygate-gateway-remove.sh` unchanged (`b5abc4e3…cab1`) |
-| v0.2.1 | `easygate-gateway-setup.sh` `5ab3de339e790f9d0bf8b74d4b8d977be96859dbe235398218863fae3a956601` — tunnel is a point-to-point `/30` (100.96.N.0/30: server .1, gateway .2) instead of `/24`<br>`easygate-gateway-remove.sh` unchanged from v0.2.0 (`b5abc4e3…cab1`) |
-| v0.2.0 | `easygate-gateway-setup.sh` `dd565a8050470d67de1f2deffaabb53e1c752b6ec4631a50ab8234f6eff0f35a` — enrollment code, `--admin-key` (no management key built in), SSH host key in the code<br>`easygate-gateway-remove.sh` `b5abc4e3ef8d90d4cd6be2ec9dd699ff3406a8a908d1511cee02a449bf69cab1` — also removes `/etc/easygate-gateway.version` |
-| v0.1.2 | `easygate-gateway-setup.sh` unchanged from v0.1.1 (`463ed4fd…f830`)<br>`easygate-gateway-remove.sh` `4cd6a2cbd6c959d9111c630ae2fb0a40b43cc7d2662e139b918f638442060e57` — new: removes the gateway configuration |
-| v0.1.1 | `463ed4fd28086512cc3402df2cf7872c5ddec71c77fa7f27a0fa497eb6a1f830` — default server `easygate.easytech.com.cy`, boot retry, DNS re-resolve |
-| v0.1.0 | `bf23080d8cd9d55c7451c9498ede680bf65e7359992da6fe7c569c8810b652a7` — initial (superseded) |
+| v0.2.4 | `easygate-gateway-setup.sh` `82b498bee86123b685e6f52195c1e0dd2a0467e81324cc7762dc94569afaa44d` — the gateway takes its time from the EasyGate server over the VPN (chrony source `100.96.N.1`, preferred; Ubuntu's time servers stay as fallback)<br>`easygate-gateway-remove.sh` `331b629b988aafa9c43572e977a0e0fad09b5f8d0fb0d38a1a60222cbf96a09d` — also removes that time source |
+| v0.2.3 | `easygate-gateway-setup.sh` `aa0feb4a0c611e88e7297beb971d662aa9fcc6be4bc3ac86f3c0d5f09c40e3a1`<br>`easygate-gateway-remove.sh` `6d1549cdd466f0ee08b9c5e165ff01323b765df525dbc12eb47c354230da6371` â€” fix: no file is written with `install /dev/stdin` any more (fails with the Rust coreutils on current Ubuntu 26.04: "install: No such file or directory"). v0.2.0â€“v0.2.2 are affected; use v0.2.3 |
+| v0.2.2 | `easygate-gateway-setup.sh` `31e579be32dab779c00b6c9062c151afab20102f3c759cacb0e5efef5ecd78db` â€” fix: v0.2.0/v0.2.1 stopped with "install: No such file or directory" on some Ubuntu 26.04 systems before printing the enrollment code<br>`easygate-gateway-remove.sh` unchanged (`b5abc4e3â€¦cab1`) |
+| v0.2.1 | `easygate-gateway-setup.sh` `5ab3de339e790f9d0bf8b74d4b8d977be96859dbe235398218863fae3a956601` â€” tunnel is a point-to-point `/30` (100.96.N.0/30: server .1, gateway .2) instead of `/24`<br>`easygate-gateway-remove.sh` unchanged from v0.2.0 (`b5abc4e3â€¦cab1`) |
+| v0.2.0 | `easygate-gateway-setup.sh` `dd565a8050470d67de1f2deffaabb53e1c752b6ec4631a50ab8234f6eff0f35a` â€” enrollment code, `--admin-key` (no management key built in), SSH host key in the code<br>`easygate-gateway-remove.sh` `b5abc4e3ef8d90d4cd6be2ec9dd699ff3406a8a908d1511cee02a449bf69cab1` â€” also removes `/etc/easygate-gateway.version` |
+| v0.1.2 | `easygate-gateway-setup.sh` unchanged from v0.1.1 (`463ed4fdâ€¦f830`)<br>`easygate-gateway-remove.sh` `4cd6a2cbd6c959d9111c630ae2fb0a40b43cc7d2662e139b918f638442060e57` â€” new: removes the gateway configuration |
+| v0.1.1 | `463ed4fd28086512cc3402df2cf7872c5ddec71c77fa7f27a0fa497eb6a1f830` â€” default server `easygate.easytech.com.cy`, boot retry, DNS re-resolve |
+| v0.1.0 | `bf23080d8cd9d55c7451c9498ede680bf65e7359992da6fe7c569c8810b652a7` â€” initial (superseded) |
 
 Always confirm the hash with EasyTech through a separate channel; a hash published only
 in this repository protects against corrupted downloads, not against a compromised repository.

@@ -16,7 +16,7 @@
 #     --keep-packages  keep the wireguard-tools package installed
 # =============================================================================
 set -uo pipefail
-VERSION="0.2.3"
+VERSION="0.2.4"
 ADMIN_USER="easyadmin"
 ASSUME_YES=no; KEEP_USER=no; KEEP_PKGS=no
 
@@ -141,6 +141,19 @@ remove_sysctl() {
   sysctl --system >/dev/null
 }
 step "Turned off IP forwarding" remove_sysctl
+
+# ---- 4b. Time source --------------------------------------------------------
+remove_time() {
+  if [[ -f /etc/chrony/sources.d/easygate.sources ]]; then
+    rm -f /etc/chrony/sources.d/easygate.sources
+    chronyc reload sources >/dev/null 2>&1 || systemctl restart chrony
+  fi
+  if [[ -f /etc/systemd/timesyncd.conf.d/easygate.conf ]]; then
+    rm -f /etc/systemd/timesyncd.conf.d/easygate.conf
+    systemctl restart systemd-timesyncd || true
+  fi
+}
+step "Removed the EasyGate time source (Ubuntu's time servers stay)" remove_time
 
 # ---- 5. SSH rules -----------------------------------------------------------
 remove_ssh_rules() {
