@@ -16,7 +16,7 @@
 #     --keep-packages  keep the wireguard-tools package installed
 # =============================================================================
 set -uo pipefail
-VERSION="0.2.0"
+VERSION="0.2.3"
 ADMIN_USER="easyadmin"
 ASSUME_YES=no; KEEP_USER=no; KEEP_PKGS=no
 
@@ -108,7 +108,8 @@ restore_firewall() {
     log "Restored the firewall rules from before EasyGate"
   else
     # Ubuntu's default: an empty ruleset that allows everything
-    install -m 755 /dev/stdin /etc/nftables.conf <<'EOF'
+    # (plain redirection: the uutils "install" on Ubuntu 26.04 cannot always read /dev/stdin)
+    cat > /etc/nftables.conf <<'EOF'
 #!/usr/sbin/nft -f
 
 flush ruleset
@@ -125,6 +126,7 @@ table inet filter {
 	}
 }
 EOF
+    chmod 755 /etc/nftables.conf
     systemctl disable nftables >/dev/null 2>&1 || true
     log "No earlier firewall found - restored Ubuntu's default (empty) ruleset"
   fi
