@@ -16,7 +16,7 @@
 #     --keep-packages  keep the wireguard-tools package installed
 # =============================================================================
 set -uo pipefail
-VERSION="0.1.1"
+VERSION="0.2.0"
 ADMIN_USER="easyadmin"
 ASSUME_YES=no; KEEP_USER=no; KEEP_PKGS=no
 
@@ -134,7 +134,7 @@ step "Removed the EasyGate firewall and NAT rules" restore_firewall
 
 # ---- 4. Kernel settings -----------------------------------------------------
 remove_sysctl() {
-  rm -f /etc/sysctl.d/90-easygate.conf
+  rm -f /etc/sysctl.d/90-easygate.conf /etc/easygate-gateway.version
   sysctl -q -w net.ipv4.ip_forward=0 >/dev/null
   sysctl --system >/dev/null
 }

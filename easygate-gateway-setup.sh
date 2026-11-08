@@ -14,11 +14,15 @@
 #        --server-pubkey <server WireGuard public key for this customer> \
 #        [--server easygate.easytech.com.cy] [--tenant 1] [--port 51001] \
 #        [--approved "192.168.1.0/24 10.10.0.0/16"] \
+#        --admin-key "ssh-ed25519 AAAA... easygate-portal" \
 #        [--mgmt-from "10.0.0.0/24"] [--hostname easygate-gw-cust1] \
 #        [--no-mgmt-ssh]
+#
+# At the end it prints an ENROLLMENT CODE (EG1....) to paste into the portal:
+# it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.1.1"
+VERSION="0.2.0"
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -31,14 +35,15 @@ MGMT_FROM=""
 NEW_HOSTNAME=""
 MGMT_SSH=yes
 ADMIN_USER="easyadmin"
-# Public key allowed to log in as $ADMIN_USER (Claude's management key, 2026-11-06)
-ADMIN_PUBKEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFsvbKGPQLkbl8vZK7AmDDHtA924Bjp+SrVKlqFW63Ww claude-easygate@DINOS-STATION'
+# Public key(s) allowed to log in as $ADMIN_USER over the tunnel: the EasyGate portal's own
+# management key, given by the portal with --admin-key (no key is built into the script).
+ADMIN_KEYS=()
 
 log()  { printf '\e[1;34m[easygate]\e[0m %s\n' "$*"; }
 warn() { printf '\e[1;33m[warning]\e[0m %s\n' "$*" >&2; }
 die()  { printf '\e[1;31m[error]\e[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 # ---- Arguments --------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -50,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --approved)       APPROVED="${2:-}"; shift 2 ;;
     --mgmt-from)      MGMT_FROM="${2:-}"; shift 2 ;;
     --hostname)       NEW_HOSTNAME="${2:-}"; shift 2 ;;
+    --admin-key)      ADMIN_KEYS+=("${2:-}"); shift 2 ;;
     --no-mgmt-ssh)    MGMT_SSH=no; shift ;;
     -h|--help)        usage ;;
     *)                die "unknown option: $1 (use --help)" ;;
@@ -82,6 +88,12 @@ if [[ ! "$SERVER" =~ ^[0-9.]+$ ]]; then
 fi
 [[ "$SERVER_PUBKEY" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$ ]] || die "--server-pubkey is not a WireGuard public key"
 [[ -z "$NEW_HOSTNAME" || "$NEW_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "--hostname invalid"
+for k in "${ADMIN_KEYS[@]}"; do
+  [[ "$k" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}(\ [A-Za-z0-9@._-]{1,64})?$ ]] || die "--admin-key is not an ssh-ed25519 public key"
+done
+if [[ "$MGMT_SSH" == yes && ${#ADMIN_KEYS[@]} -eq 0 ]]; then
+  die "--admin-key is required (copy the full command from the EasyGate portal), or use --no-mgmt-ssh"
+fi
 command -v python3 >/dev/null || die "python3 is required (installed by default on Ubuntu Server)"
 
 SERVER_TUN="100.96.${TENANT_ID}.1"
@@ -141,7 +153,9 @@ fi
 usermod -aG sudo "$ADMIN_USER"
 install -m 440 /dev/stdin "/etc/sudoers.d/90-$ADMIN_USER" <<<"$ADMIN_USER ALL=(ALL) NOPASSWD:ALL"
 install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/$ADMIN_USER/.ssh"
-install -m 600 -o "$ADMIN_USER" -g "$ADMIN_USER" /dev/stdin "/home/$ADMIN_USER/.ssh/authorized_keys" <<<"$ADMIN_PUBKEY"
+# Replaces any key from an older installer: only the keys given now may log in.
+printf '%s\n' "${ADMIN_KEYS[@]}" | install -m 600 -o "$ADMIN_USER" -g "$ADMIN_USER" /dev/stdin "/home/$ADMIN_USER/.ssh/authorized_keys"
+echo "$VERSION" | install -m 644 /dev/stdin /etc/easygate-gateway.version
 
 # ---- 3. WireGuard key (generated here, never leaves this machine) -----------
 install -d -m 700 /etc/wireguard
@@ -325,22 +339,46 @@ systemctl restart wg-quick@wg0
 systemctl enable --now easygate-reresolve.timer >/dev/null 2>&1
 
 PUBLIC_IP=$(curl -4 -s --max-time 8 https://api.ipify.org || true)
+[[ "$PUBLIC_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || PUBLIC_IP=""
+
+# ---- 10. Enrollment code ----------------------------------------------------
+# EG1.<base64url JSON>.<first 8 hex of sha256(base64 part)>: one paste gives the portal the
+# WireGuard key, site IP, LAN and the SSH host key it pins (no "trust on first use").
+[[ -s /etc/ssh/ssh_host_ed25519_key.pub ]] || ssh-keygen -A >/dev/null
+HOST_KEY=$(awk '{print $1" "$2}' /etc/ssh/ssh_host_ed25519_key.pub)
+[[ "$HOST_KEY" =~ ^ssh-ed25519\ AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$ ]] || die "unexpected SSH host key format in /etc/ssh/ssh_host_ed25519_key.pub"
+[[ "$GW_PUBKEY" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$ ]] || die "unexpected WireGuard public key format"
+THIS_HOST=$(hostname)
+[[ "$THIS_HOST" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || THIS_HOST=""
+# every value is validated above, so plain printf builds valid JSON
+PAYLOAD=$(printf '{"v":1,"t":%d,"k":"%s","ip":"%s","lan":"%s","h":"%s","hk":"%s","ver":"%s"}' \
+  "$TENANT_ID" "$GW_PUBKEY" "$PUBLIC_IP" "$LAN_NET" "$THIS_HOST" "$HOST_KEY" "$VERSION")
+B64=$(printf '%s' "$PAYLOAD" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+SUM=$(printf '%s' "$B64" | sha256sum | cut -c1-8)
+ENROLL_CODE="EG1.${B64}.${SUM}"
+HOST_FP=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')
 
 # ---- Summary ----------------------------------------------------------------
 cat <<EOF
 
 =====================================================================
- EasyGate gateway configured  v${VERSION}  ($(hostname), $(date '+%Y-%m-%d %H:%M'))
+ EasyGate gateway configured  v${VERSION}  (${THIS_HOST:-$(hostname)}, $(date '+%Y-%m-%d %H:%M'))
 =====================================================================
  Gateway LAN:          $LAN_IF  $GW_IP  ($LAN_NET via $DEF_ROUTER)
  Tunnel:               $GW_TUN -> $SERVER_TUN  ($SERVER:$PORT)
  Approved subnets:     $APPROVED
+ Site public IP:       ${PUBLIC_IP:-unknown - check with your router}
+ SSH host key:         $HOST_FP
 
- >>> Send these two values to the EasyGate server administrator: <<<
-   Gateway public key: $GW_PUBKEY
-   Site public IP:     ${PUBLIC_IP:-unknown - check with your router}
+ >>> Paste this ENROLLMENT CODE into the EasyGate portal <<<
+     (customer page -> Setup instructions -> Paste the enrollment code)
 
- The tunnel connects automatically as soon as the server accepts
- this key and public IP. Check with:   sudo wg show
+EOF
+printf '%s\n' "$ENROLL_CODE"
+cat <<EOF
+
+ The tunnel connects as soon as the portal accepts the code.
+ Check with:   sudo wg show
+ (Older portal? The gateway public key is: $GW_PUBKEY)
 =====================================================================
 EOF

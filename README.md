@@ -10,14 +10,18 @@ Always download a **tagged version** and check its SHA-256 against the value you
 from EasyTech before running it.
 
 ```bash
-VER=v0.1.1
+VER=v0.2.0
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-setup.sh"
 sha256sum easygate-gateway-setup.sh        # must match the published hash for ${VER}
 sudo bash easygate-gateway-setup.sh \
   --server-pubkey <server public key for this customer> \
   --tenant <customer number> \
+  --admin-key "<EasyGate portal SSH public key>" \
   --hostname easygate-gw-<customer>
 ```
+
+The EasyGate portal shows this command with every value filled in: copy it from the customer's
+Setup instructions.
 
 Options:
 
@@ -30,10 +34,13 @@ Options:
 | `--approved "a/b c/d"` | Customer subnets the server may reach | the gateway's LAN subnet |
 | `--mgmt-from "a/b"` | Extra subnets allowed to manage the gateway locally | — |
 | `--hostname` | Set the gateway hostname | unchanged |
+| `--admin-key "ssh-ed25519 …"` | Public key allowed to manage the gateway over the VPN (the EasyGate portal's key); repeatable | required unless `--no-mgmt-ssh` |
 | `--no-mgmt-ssh` | Disable management SSH over the VPN | enabled |
 
-At the end the script prints the **gateway public key** and the **site public IP**;
-send both to EasyTech so the server can accept the connection.
+At the end the script prints an **enrollment code** (`EG1.…`). Paste it into the EasyGate
+portal: it carries the gateway public key, the site public IP, the LAN and the gateway's SSH
+host key (which the portal pins, so it only ever talks to this gateway). The code contains no
+secrets. A checksum at the end rejects a mistyped or incomplete code.
 
 ## Remove a gateway (or start over)
 
@@ -46,7 +53,7 @@ Run it on the gateway console or over SSH from the LAN (not over the tunnel), lo
 with the site's own admin account:
 
 ```bash
-VER=v0.1.2
+VER=v0.2.0
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-remove.sh"
 sha256sum easygate-gateway-remove.sh       # must match the published hash for ${VER}
 sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
@@ -55,13 +62,14 @@ sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
 Options: `--yes` (no confirmation), `--keep-user` (keep the `easyadmin` account),
 `--keep-packages` (keep `wireguard-tools`).
 
-To **start over**, run the installer again afterwards. It creates a new gateway key, so send
-the new gateway public key to EasyTech.
+To **start over**, run the installer again afterwards. It creates a new gateway key, so paste
+the new enrollment code into the portal.
 
 ## Versions
 
 | Version | SHA-256 |
 |---|---|
+| v0.2.0 | `easygate-gateway-setup.sh` `dd565a8050470d67de1f2deffaabb53e1c752b6ec4631a50ab8234f6eff0f35a` — enrollment code, `--admin-key` (no management key built in), SSH host key in the code<br>`easygate-gateway-remove.sh` `b5abc4e3ef8d90d4cd6be2ec9dd699ff3406a8a908d1511cee02a449bf69cab1` — also removes `/etc/easygate-gateway.version` |
 | v0.1.2 | `easygate-gateway-setup.sh` unchanged from v0.1.1 (`463ed4fd…f830`)<br>`easygate-gateway-remove.sh` `4cd6a2cbd6c959d9111c630ae2fb0a40b43cc7d2662e139b918f638442060e57` — new: removes the gateway configuration |
 | v0.1.1 | `463ed4fd28086512cc3402df2cf7872c5ddec71c77fa7f27a0fa497eb6a1f830` — default server `easygate.easytech.com.cy`, boot retry, DNS re-resolve |
 | v0.1.0 | `bf23080d8cd9d55c7451c9498ede680bf65e7359992da6fe7c569c8810b652a7` — initial (superseded) |
