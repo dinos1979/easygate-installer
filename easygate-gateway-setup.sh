@@ -22,7 +22,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -172,7 +172,7 @@ log "Writing /etc/wireguard/wg0.conf..."
 install -m 600 /dev/stdin /etc/wireguard/wg0.conf <<EOF
 # EasyGate tunnel - generated $(date -Is) by easygate-gateway-setup.sh
 [Interface]
-Address = ${GW_TUN}/24
+Address = ${GW_TUN}/30
 PostUp = wg set %i private-key /etc/wireguard/gw.key
 MTU = 1420
 
