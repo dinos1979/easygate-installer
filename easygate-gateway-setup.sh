@@ -22,7 +22,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.2.1"
+VERSION="0.2.2"
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -154,8 +154,12 @@ usermod -aG sudo "$ADMIN_USER"
 install -m 440 /dev/stdin "/etc/sudoers.d/90-$ADMIN_USER" <<<"$ADMIN_USER ALL=(ALL) NOPASSWD:ALL"
 install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/$ADMIN_USER/.ssh"
 # Replaces any key from an older installer: only the keys given now may log in.
-printf '%s\n' "${ADMIN_KEYS[@]}" | install -m 600 -o "$ADMIN_USER" -g "$ADMIN_USER" /dev/stdin "/home/$ADMIN_USER/.ssh/authorized_keys"
-echo "$VERSION" | install -m 644 /dev/stdin /etc/easygate-gateway.version
+# (plain redirection, not "| install /dev/stdin": some uutils versions on 26.04 cannot read a pipe)
+( umask 077; printf '%s\n' "${ADMIN_KEYS[@]}" > "/home/$ADMIN_USER/.ssh/authorized_keys" )
+chown "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.ssh/authorized_keys"
+chmod 600 "/home/$ADMIN_USER/.ssh/authorized_keys"
+printf '%s\n' "$VERSION" > /etc/easygate-gateway.version
+chmod 644 /etc/easygate-gateway.version
 
 # ---- 3. WireGuard key (generated here, never leaves this machine) -----------
 install -d -m 700 /etc/wireguard

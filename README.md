@@ -10,7 +10,7 @@ Always download a **tagged version** and check its SHA-256 against the value you
 from EasyTech before running it.
 
 ```bash
-VER=v0.2.1
+VER=v0.2.2
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-setup.sh"
 sha256sum easygate-gateway-setup.sh        # must match the published hash for ${VER}
 sudo bash easygate-gateway-setup.sh \
@@ -69,6 +69,7 @@ the new enrollment code into the portal.
 
 | Version | SHA-256 |
 |---|---|
+| v0.2.2 | `easygate-gateway-setup.sh` `31e579be32dab779c00b6c9062c151afab20102f3c759cacb0e5efef5ecd78db` — fix: v0.2.0/v0.2.1 stopped with "install: No such file or directory" on some Ubuntu 26.04 systems before printing the enrollment code<br>`easygate-gateway-remove.sh` unchanged (`b5abc4e3…cab1`) |
 | v0.2.1 | `easygate-gateway-setup.sh` `5ab3de339e790f9d0bf8b74d4b8d977be96859dbe235398218863fae3a956601` — tunnel is a point-to-point `/30` (100.96.N.0/30: server .1, gateway .2) instead of `/24`<br>`easygate-gateway-remove.sh` unchanged from v0.2.0 (`b5abc4e3…cab1`) |
 | v0.2.0 | `easygate-gateway-setup.sh` `dd565a8050470d67de1f2deffaabb53e1c752b6ec4631a50ab8234f6eff0f35a` — enrollment code, `--admin-key` (no management key built in), SSH host key in the code<br>`easygate-gateway-remove.sh` `b5abc4e3ef8d90d4cd6be2ec9dd699ff3406a8a908d1511cee02a449bf69cab1` — also removes `/etc/easygate-gateway.version` |
 | v0.1.2 | `easygate-gateway-setup.sh` unchanged from v0.1.1 (`463ed4fd…f830`)<br>`easygate-gateway-remove.sh` `4cd6a2cbd6c959d9111c630ae2fb0a40b43cc7d2662e139b918f638442060e57` — new: removes the gateway configuration |
