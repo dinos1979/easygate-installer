@@ -2,7 +2,7 @@
 # =============================================================================
 # EasyGate - remove the gateway configuration (undoes easygate-gateway-setup.sh)
 #
-# Removes: the WireGuard tunnel, its keys and config, the endpoint re-resolve timer,
+# Removes: the WireGuard tunnel, its keys and config, the tunnel watchdog,
 # the EasyGate firewall/NAT rules (restores the firewall that was there before),
 # IP forwarding, the EasyGate SSH rules, and the 'easyadmin' management account.
 # The hostname, the network settings and other users are not changed.
@@ -16,7 +16,7 @@
 #     --keep-packages  keep the wireguard-tools package installed
 # =============================================================================
 set -uo pipefail
-VERSION="0.2.4"
+VERSION="0.2.5"
 ADMIN_USER="easyadmin"
 ASSUME_YES=no; KEEP_USER=no; KEEP_PKGS=no
 
@@ -58,7 +58,7 @@ cat <<EOF
 
 This removes the EasyGate configuration from $(hostname):
   - WireGuard tunnel wg0, its keys and /etc/wireguard (the gateway key is destroyed)
-  - the endpoint re-resolve timer and the wg-quick boot settings
+  - the tunnel watchdog (and its restart counter) and the wg-quick boot settings
   - the EasyGate firewall and NAT rules (the previous firewall is restored)
   - IP forwarding and the EasyGate SSH rules
 EOF
@@ -79,14 +79,17 @@ step() {  # step <description> <command...>: run, report, keep going on failure
   if "$@"; then log "$desc"; else warn "$desc - FAILED (continuing)"; FAILED=1; fi
 }
 
-# ---- 1. Re-resolve timer ----------------------------------------------------
-remove_reresolve() {
-  systemctl disable --now easygate-reresolve.timer >/dev/null 2>&1 || true
-  systemctl stop easygate-reresolve.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/easygate-reresolve.timer /etc/systemd/system/easygate-reresolve.service \
+# ---- 1. Tunnel watchdog (and the re-resolve timer of installers up to v0.2.4) ----
+remove_watchdog() {
+  systemctl disable --now easygate-watchdog.timer easygate-reresolve.timer >/dev/null 2>&1 || true
+  systemctl stop easygate-watchdog.service easygate-reresolve.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/easygate-watchdog.timer /etc/systemd/system/easygate-watchdog.service \
+        /usr/local/sbin/easygate-watchdog \
+        /etc/systemd/system/easygate-reresolve.timer /etc/systemd/system/easygate-reresolve.service \
         /usr/local/sbin/easygate-reresolve
+  rm -rf /var/lib/easygate-gateway
 }
-step "Removed the endpoint re-resolve timer" remove_reresolve
+step "Removed the tunnel watchdog and its restart counter" remove_watchdog
 
 # ---- 2. WireGuard tunnel ----------------------------------------------------
 remove_tunnel() {
@@ -95,7 +98,7 @@ remove_tunnel() {
   rm -rf /etc/systemd/system/wg-quick@wg0.service.d
   rm -rf /etc/wireguard
   systemctl daemon-reload
-  systemctl reset-failed wg-quick@wg0 easygate-reresolve.service >/dev/null 2>&1 || true
+  systemctl reset-failed wg-quick@wg0 easygate-watchdog.service easygate-reresolve.service >/dev/null 2>&1 || true
 }
 step "Stopped the tunnel and deleted /etc/wireguard (keys included)" remove_tunnel
 

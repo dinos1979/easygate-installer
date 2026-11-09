@@ -16,16 +16,20 @@
 #        [--approved "192.168.1.0/24 10.10.0.0/16"] \
 #        --admin-key "ssh-ed25519 AAAA... easygate-portal" \
 #        [--mgmt-from "10.0.0.0/24"] [--hostname easygate-gw-cust1] \
-#        [--no-mgmt-ssh]
+#        [--no-mgmt-ssh] [--restart-after 180]
+#
+# --restart-after: restart the tunnel when the server has not answered for this
+# many seconds (90-3600, default 180; 0 = never). See section 8.
 #
 # At the end it prints an ENROLLMENT CODE (EG1....) to paste into the portal:
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.2.4"
+VERSION="0.2.5"
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
+RESTART_AFTER=180
 PORT=""
 SERVER="easygate.easytech.com.cy"
 SERVER_ADDR=""
@@ -74,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --hostname)       NEW_HOSTNAME="${2:-}"; shift 2 ;;
     --admin-key)      ADMIN_KEYS+=("${2:-}"); shift 2 ;;
     --no-mgmt-ssh)    MGMT_SSH=no; shift ;;
+    --restart-after)  RESTART_AFTER="${2:-}"; shift 2 ;;
     -h|--help)        usage ;;
     *)                die "unknown option: $1 (use --help)" ;;
   esac
@@ -104,6 +109,8 @@ if [[ ! "$SERVER" =~ ^[0-9.]+$ ]]; then
   [[ -n "$SERVER_ADDR" ]] || die "cannot resolve $SERVER - check DNS (the name needs an A record)"
 fi
 [[ "$SERVER_PUBKEY" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$ ]] || die "--server-pubkey is not a WireGuard public key"
+[[ "$RESTART_AFTER" =~ ^[0-9]{1,4}$ ]] && (( RESTART_AFTER == 0 || (RESTART_AFTER >= 90 && RESTART_AFTER <= 3600) )) \
+  || die "--restart-after must be 0 (never) or 90-3600 seconds"
 [[ -z "$NEW_HOSTNAME" || "$NEW_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "--hostname invalid"
 for k in "${ADMIN_KEYS[@]}"; do
   [[ "$k" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}(\ [A-Za-z0-9@._-]{1,64})?$ ]] || die "--admin-key is not an ssh-ed25519 public key"
@@ -309,51 +316,118 @@ Restart=on-failure
 RestartSec=30
 EOF
 
-put 755 /usr/local/sbin/easygate-reresolve <<'EOF'
+# Tunnel watchdog (replaces the re-resolve timer of installers up to v0.2.4).
+systemctl disable --now easygate-reresolve.timer >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/easygate-reresolve.timer /etc/systemd/system/easygate-reresolve.service /usr/local/sbin/easygate-reresolve
+
+put 755 /usr/local/sbin/easygate-watchdog <<'EOF'
 #!/usr/bin/env bash
-# Re-resolve the server endpoint when the handshake is stale (> 135 s), e.g. after a server IP change.
+# EasyGate tunnel watchdog (run every 30 s by easygate-watchdog.timer).
+#  - No handshake for > 135 s: re-resolve the server name (its IP may have changed).
+#  - No handshake for > RESTART_AFTER s: restart the tunnel. It comes back on a new UDP source port,
+#    so every firewall on the way builds a fresh session; a stale firewall session can otherwise
+#    block the old port for good. If a restart does not help, the wait doubles (up to 30 min).
+# Every restart is counted in /var/lib/easygate-gateway/watchdog.state, which the portal reads.
 set -euo pipefail
-IF=wg0; CONF=/etc/wireguard/wg0.conf
-ip link show "$IF" >/dev/null 2>&1 || exit 0
+IF=wg0; CONF=/etc/wireguard/wg0.conf; UNIT=wg-quick@wg0
+STATE_DIR=/var/lib/easygate-gateway; STATE=$STATE_DIR/watchdog.state
+RESTART_AFTER=${RESTART_AFTER:-180}; MAX_WAIT=1800
+[[ "$RESTART_AFTER" =~ ^[0-9]{1,4}$ ]] || RESTART_AFTER=180
+[[ -f "$CONF" ]] || exit 0
+ip link show "$IF" >/dev/null 2>&1 || exit 0            # down or failed: systemd retries wg-quick itself
+systemctl is-active --quiet easygate-upgrade && exit 0   # an installer run restarts the tunnel itself
+
+restarts=0; last_restart=0; last_reason=""; last_silence=0; fails=0
+if [[ -r "$STATE" ]]; then
+  while IFS='=' read -r k v; do
+    case "$k" in
+      restarts)     if [[ "$v" =~ ^[0-9]{1,9}$ ]]; then restarts=$v; fi ;;
+      last_restart) if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then last_restart=$v; fi ;;
+      last_reason)  if [[ "$v" =~ ^[a-z-]{1,40}$ ]]; then last_reason=$v; fi ;;
+      last_silence) if [[ "$v" =~ ^[0-9]{1,9}$ ]]; then last_silence=$v; fi ;;
+      fails)        if [[ "$v" =~ ^[0-9]{1,3}$ ]]; then fails=$v; fi ;;
+    esac
+  done < "$STATE"
+fi
+save() {
+  mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
+  local tmp; tmp=$(mktemp "$STATE_DIR/.watchdog.XXXXXX")
+  printf 'restarts=%s\nlast_restart=%s\nlast_reason=%s\nlast_silence=%s\nfails=%s\n' \
+    "$restarts" "$last_restart" "$last_reason" "$last_silence" "$fails" > "$tmp"
+  chmod 644 "$tmp"; mv -f "$tmp" "$STATE"
+}
+[[ -f "$STATE" ]] || save
+
 # (keys end in '=', so strip the "Name = " prefix instead of splitting on '=')
 PEER=$(awk '/^PublicKey[ \t]*=/{sub(/^PublicKey[ \t]*=[ \t]*/,""); print; exit}' "$CONF")
 ENDPOINT=$(awk '/^Endpoint[ \t]*=/{sub(/^Endpoint[ \t]*=[ \t]*/,""); print; exit}' "$CONF")
 [[ -n "$PEER" && -n "$ENDPOINT" ]] || exit 0
-LAST=$(wg show "$IF" latest-handshakes | awk -v p="$PEER" '$1==p{print $2}')
 NOW=$(date +%s)
-if [[ -z "$LAST" || "$LAST" -eq 0 || $((NOW - LAST)) -gt 135 ]]; then
-  wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" && logger -t easygate "re-resolved endpoint $ENDPOINT"
-fi
+LAST=$(wg show "$IF" latest-handshakes 2>/dev/null | awk -v p="$PEER" '$1==p{print $2}' || true)
+[[ "$LAST" =~ ^[0-9]{1,12}$ ]] || LAST=0
+# When the tunnel (re)started: counts as the start of the silence if there was no handshake since.
+STARTED=$(systemctl show --timestamp=unix -P ActiveEnterTimestamp "$UNIT" 2>/dev/null | tr -dc '0-9' || true)
+[[ "$STARTED" =~ ^[0-9]{1,12}$ ]] && (( STARTED > 0 )) || STARTED=$NOW
+
+# A handshake after the last restart: the tunnel works, forget earlier failed attempts.
+if (( LAST > last_restart && fails > 0 )); then fails=0; save; fi
+
+REF=$(( LAST > STARTED ? LAST : STARTED ))
+SILENCE=$(( NOW - REF ))
+(( SILENCE > 135 )) || exit 0
+
+wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true   # re-resolve the server name
+
+(( RESTART_AFTER > 0 )) || exit 0
+WAIT=$RESTART_AFTER
+for (( i = 0; i < fails && WAIT < MAX_WAIT; i++ )); do WAIT=$(( WAIT * 2 )); done
+if (( WAIT > MAX_WAIT )); then WAIT=$MAX_WAIT; fi
+if (( WAIT < RESTART_AFTER )); then WAIT=$RESTART_AFTER; fi
+(( SILENCE >= WAIT )) || exit 0
+
+restarts=$(( restarts + 1 )); fails=$(( fails + 1 )); last_restart=$NOW
+last_reason=no-handshake; last_silence=$(( LAST > 0 ? NOW - LAST : SILENCE ))
+save
+logger -t easygate-watchdog "no reply from the EasyGate server for ${SILENCE}s: restarting the tunnel (restart #${restarts}, next try after $(( WAIT * 2 > MAX_WAIT ? MAX_WAIT : WAIT * 2 ))s)"
+systemctl restart "$UNIT"
 EOF
 
-put 644 /etc/systemd/system/easygate-reresolve.service <<'EOF'
+put 644 /etc/systemd/system/easygate-watchdog.service <<EOF
 [Unit]
-Description=EasyGate - re-resolve VPN server endpoint
+Description=EasyGate - tunnel watchdog
 After=wg-quick@wg0.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/easygate-reresolve
+Environment=RESTART_AFTER=${RESTART_AFTER}
+ExecStart=/usr/local/sbin/easygate-watchdog
 EOF
 
-put 644 /etc/systemd/system/easygate-reresolve.timer <<'EOF'
+put 644 /etc/systemd/system/easygate-watchdog.timer <<'EOF'
 [Unit]
-Description=EasyGate - re-resolve VPN server endpoint every 2 minutes
+Description=EasyGate - tunnel watchdog every 30 seconds
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
+OnBootSec=1min
+OnUnitActiveSec=30s
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target
 EOF
+mkd 755 /var/lib/easygate-gateway
 systemctl daemon-reload
 
 # ---- 9. Start tunnel --------------------------------------------------------
 log "Starting tunnel..."
 systemctl enable wg-quick@wg0 >/dev/null 2>&1
 systemctl restart wg-quick@wg0
-systemctl enable --now easygate-reresolve.timer >/dev/null 2>&1
+systemctl enable --now easygate-watchdog.timer >/dev/null 2>&1
+if (( RESTART_AFTER > 0 )); then
+  log "Watchdog:         restarts the tunnel after ${RESTART_AFTER}s without reply from the server"
+else
+  log "Watchdog:         re-resolves the server name only (--restart-after 0)"
+fi
 
 # ---- 9b. Time: the EasyGate server over the VPN first, Ubuntu's servers as fallback ----
 # The server answers time requests on its tunnel address only to this gateway.
@@ -413,6 +487,7 @@ cat <<EOF
  Site public IP:       ${PUBLIC_IP:-unknown - check with your router}
  SSH host key:         $HOST_FP
  Time sync:            $TIME_SYNC
+ Tunnel watchdog:      $( (( RESTART_AFTER > 0 )) && echo "restart after ${RESTART_AFTER}s without reply" || echo "off (re-resolve only)")
 
  >>> Paste this ENROLLMENT CODE into the EasyGate portal <<<
      (customer page -> Setup instructions -> Paste the enrollment code)
