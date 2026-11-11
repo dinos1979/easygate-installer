@@ -25,7 +25,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.3.1"   # = the EasyGate server version (same number in both repositories)
+VERSION="0.3.2"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -452,8 +452,8 @@ systemctl daemon-reload
 # Devices at the site copy firmware from (and configs to) this gateway. Everything is OFF until an admin starts it in
 # the EasyGate portal, which then copies the chosen library files here, opens the ports on the LAN only (firewall chain
 # files_in), and sets a new password for the '${FILES_USER}' account. Stop (or the auto-stop timer, or a reboot) closes
-# the ports, stops the servers, locks the account and removes the library copies; files devices uploaded stay in
-# received/ until deleted in the portal.
+# the ports, stops the servers and locks the account. Files stay on the gateway (library copies and what devices
+# uploaded into received/) until deleted in the portal (user's choice, v0.3.2).
 #   ${FILES_ROOT}            TFTP and HTTP root: library copies (read-only for devices)
 #   ${FILES_ROOT}/received   uploads from devices (TFTP / SFTP / SCP); not readable over TFTP or HTTP
 #   ${FILES_JAIL}            chroot of '${FILES_USER}' (sh, scp, sftp-server only); ${FILES_ROOT} is bind-mounted at files/
@@ -558,7 +558,8 @@ stop_all() {
   systemctl stop tftpd-hpa easygate-files-http >/dev/null 2>&1 || true
   usermod --lock "$USER_NAME" >/dev/null 2>&1 || true
   pkill -KILL -u "$USER_NAME" >/dev/null 2>&1 || true
-  find "$ROOT" -maxdepth 1 -type f -delete
+  # files stay: they are removed only with "delete" from the portal; leftovers of an interrupted copy go
+  find "$ROOT" -maxdepth 1 -type f -name '.put.*' -delete
   rm -f "$STATE"
 }
 
@@ -635,7 +636,7 @@ esac
 EOF
 chmod 755 /usr/local/sbin/easygate-files
 
-# Closed after every boot: no ports, servers stopped, account locked, library copies removed.
+# Closed after every boot: no ports, servers stopped, account locked (files stay).
 put 644 /etc/systemd/system/easygate-files-reset.service <<'EOF'
 [Unit]
 Description=EasyGate - file services off after boot

@@ -10,7 +10,7 @@ Always download a **tagged version** and check its SHA-256 against the value you
 from EasyTech before running it.
 
 ```bash
-VER=v0.3.1
+VER=v0.3.2
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-setup.sh"
 sha256sum easygate-gateway-setup.sh        # must match the published hash for ${VER}
 sudo bash easygate-gateway-setup.sh \
@@ -51,7 +51,7 @@ list) and **SFTP / SCP** (port 22, user `files`). Everything is **off** until an
 in the EasyGate portal (File services), which copies the chosen firmware files to the gateway,
 opens the ports on the LAN only and sets a new password for `files`. The servers stop by
 themselves after the chosen time, at Stop, or when the gateway reboots: ports closed, account
-locked, firmware copies removed.
+locked. Files stay on the gateway until they are deleted in the portal (from v0.3.2).
 
 - Devices download from the top folder: `tftp://<gateway>/<file>`, `http://<gateway>/<file>`,
   `scp://files@<gateway>/<file>`.
@@ -75,7 +75,7 @@ Run it on the gateway console or over SSH from the LAN (not over the tunnel), lo
 with the site's own admin account:
 
 ```bash
-VER=v0.3.1
+VER=v0.3.2
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-remove.sh"
 sha256sum easygate-gateway-remove.sh       # must match the published hash for ${VER}
 sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
@@ -94,6 +94,7 @@ whose installer differs from the server.
 
 | Version | SHA-256 |
 |---|---|
+| v0.3.2 | `easygate-gateway-setup.sh` `7b540791613405cc6f18968f1bba5c793b918c84a4c6c90b3587506b1ee23349` — files stay on the gateway when the servers stop (Stop, auto-stop, reboot): they are deleted only from the portal<br>`easygate-gateway-remove.sh` `bfb65d0a38e1c54c30f25b4117619acd0fe68cf6510ff91a54e7b02cfbdfe0fb` — version number only |
 | v0.3.1 | `easygate-gateway-setup.sh` `e9832b69e62254f926319eb9dd08fd55bc2a6f714964e72ecebe072233c04f10` — file services for network devices: TFTP, HTTP and SFTP / SCP on the gateway, off until started in the portal (see above); same version number as the EasyGate server<br>`easygate-gateway-remove.sh` `bd4764af0655319bae6f6b8d070d007c5f0b340e14745106d033734aaa033382` — also removes the file services and their files |
 | v0.3.0 | not to be used: its SHA256SUMS still lists the v0.2.5 hashes, and TFTP uploads and SCP did not work. Use v0.3.1 |
 | v0.2.5 | `easygate-gateway-setup.sh` `00b0531ca5ea5d0950cfdf7a48215b09f0648236fffc539d5f38c18b5050ae51` — tunnel watchdog: when the server has not answered for `--restart-after` seconds (default 180, 0 = never) the tunnel restarts on a new UDP port, so firewalls build fresh sessions; waits double up to 30 min; restarts are counted for the portal. Replaces the re-resolve timer<br>`easygate-gateway-remove.sh` `4270fe46ac6b6fb10b6852b32560be2825e29e20200fbd354887c98eddd908d1` — also removes the watchdog and its counter |
