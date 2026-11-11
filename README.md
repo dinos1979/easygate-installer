@@ -10,7 +10,7 @@ Always download a **tagged version** and check its SHA-256 against the value you
 from EasyTech before running it.
 
 ```bash
-VER=v0.2.5
+VER=v0.3.1
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-setup.sh"
 sha256sum easygate-gateway-setup.sh        # must match the published hash for ${VER}
 sudo bash easygate-gateway-setup.sh \
@@ -43,33 +43,59 @@ portal: it carries the gateway public key, the site public IP, the LAN and the g
 host key (which the portal pins, so it only ever talks to this gateway). The code contains no
 secrets. A checksum at the end rejects a mistyped or incomplete code.
 
+## File services (from v0.3.0)
+
+The gateway can serve files to the network devices at its site, for firmware updates and
+config backups: **TFTP** (port 69), **HTTP** (port set in the portal, default 80, with a file
+list) and **SFTP / SCP** (port 22, user `files`). Everything is **off** until an admin starts it
+in the EasyGate portal (File services), which copies the chosen firmware files to the gateway,
+opens the ports on the LAN only and sets a new password for `files`. The servers stop by
+themselves after the chosen time, at Stop, or when the gateway reboots: ports closed, account
+locked, firmware copies removed.
+
+- Devices download from the top folder: `tftp://<gateway>/<file>`, `http://<gateway>/<file>`,
+  `scp://files@<gateway>/<file>`.
+- Devices upload into `received/` (TFTP, SCP, SFTP), e.g.
+  `copy running-config tftp://<gateway>/received/router1-confg`. Uploaded files cannot be read
+  back over TFTP or HTTP; the portal downloads them.
+- `files` is locked into `/srv/easygate-sftp` (only `sh`, `scp` and `sftp-server` inside), cannot
+  forward ports or open a terminal, and may write only into `received/`.
+- The portal runs `/usr/local/sbin/easygate-files start|stop|status|list|put|get|delete` over the
+  tunnel. Installs the `tftpd-hpa` package (disabled at boot).
+
 ## Remove a gateway (or start over)
 
 `easygate-gateway-remove.sh` undoes the installer: it deletes the tunnel and its keys
 (`/etc/wireguard`), the EasyGate firewall/NAT rules (the earlier firewall is restored),
-IP forwarding, the EasyGate SSH rules, the `easyadmin` account and the WireGuard package.
+IP forwarding, the EasyGate SSH rules, the file services (`files` account, `/srv/easygate-files`),
+the `easyadmin` account and the WireGuard and TFTP packages.
 The hostname, network settings and other users are not touched.
 
 Run it on the gateway console or over SSH from the LAN (not over the tunnel), logged in
 with the site's own admin account:
 
 ```bash
-VER=v0.2.5
+VER=v0.3.1
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-remove.sh"
 sha256sum easygate-gateway-remove.sh       # must match the published hash for ${VER}
 sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
 ```
 
 Options: `--yes` (no confirmation), `--keep-user` (keep the `easyadmin` account),
-`--keep-packages` (keep `wireguard-tools`).
+`--keep-packages` (keep `wireguard-tools` and `tftpd-hpa`).
 
 To **start over**, run the installer again afterwards. It creates a new gateway key, so paste
 the new enrollment code into the portal.
 
 ## Versions
 
+The installer version is the same as the EasyGate server version: the portal flags a gateway
+whose installer differs from the server.
+
 | Version | SHA-256 |
 |---|---|
+| v0.3.1 | `easygate-gateway-setup.sh` `e9832b69e62254f926319eb9dd08fd55bc2a6f714964e72ecebe072233c04f10` — file services for network devices: TFTP, HTTP and SFTP / SCP on the gateway, off until started in the portal (see above); same version number as the EasyGate server<br>`easygate-gateway-remove.sh` `bd4764af0655319bae6f6b8d070d007c5f0b340e14745106d033734aaa033382` — also removes the file services and their files |
+| v0.3.0 | not to be used: its SHA256SUMS still lists the v0.2.5 hashes, and TFTP uploads and SCP did not work. Use v0.3.1 |
 | v0.2.5 | `easygate-gateway-setup.sh` `00b0531ca5ea5d0950cfdf7a48215b09f0648236fffc539d5f38c18b5050ae51` — tunnel watchdog: when the server has not answered for `--restart-after` seconds (default 180, 0 = never) the tunnel restarts on a new UDP port, so firewalls build fresh sessions; waits double up to 30 min; restarts are counted for the portal. Replaces the re-resolve timer<br>`easygate-gateway-remove.sh` `4270fe46ac6b6fb10b6852b32560be2825e29e20200fbd354887c98eddd908d1` — also removes the watchdog and its counter |
 | v0.2.4 | `easygate-gateway-setup.sh` `82b498bee86123b685e6f52195c1e0dd2a0467e81324cc7762dc94569afaa44d` — the gateway takes its time from the EasyGate server over the VPN (chrony source `100.96.N.1`, preferred; Ubuntu's time servers stay as fallback)<br>`easygate-gateway-remove.sh` `331b629b988aafa9c43572e977a0e0fad09b5f8d0fb0d38a1a60222cbf96a09d` — also removes that time source |
 | v0.2.3 | `easygate-gateway-setup.sh` `aa0feb4a0c611e88e7297beb971d662aa9fcc6be4bc3ac86f3c0d5f09c40e3a1`<br>`easygate-gateway-remove.sh` `6d1549cdd466f0ee08b9c5e165ff01323b765df525dbc12eb47c354230da6371` — fix: no file is written with `install /dev/stdin` any more (fails with the Rust coreutils on current Ubuntu 26.04: "install: No such file or directory"). v0.2.0–v0.2.2 are affected; use v0.2.3 |

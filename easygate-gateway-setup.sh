@@ -25,7 +25,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.3.0"
+VERSION="0.3.1"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -470,7 +470,7 @@ mkd 2770 "$FILES_ROOT/received" "root:$FILES_USER"
 # The jail: root-owned all the way down (sshd requires it), with only what legacy SCP and SFTP need.
 SFTP_SERVER=$(sshd -T 2>/dev/null | awk '$1=="subsystem" && $2=="sftp" {print $3; exit}')
 [[ -n "$SFTP_SERVER" && "$SFTP_SERVER" != internal-sftp ]] || SFTP_SERVER=/usr/lib/openssh/sftp-server
-rm -rf "${FILES_JAIL:?}/bin" "${FILES_JAIL:?}/usr" "${FILES_JAIL:?}/lib" "${FILES_JAIL:?}/lib64" "${FILES_JAIL:?}/dev"
+rm -rf "${FILES_JAIL:?}/bin" "${FILES_JAIL:?}/usr" "${FILES_JAIL:?}/lib" "${FILES_JAIL:?}/lib64" "${FILES_JAIL:?}/dev" "${FILES_JAIL:?}/etc"
 mkd 755 "$FILES_JAIL" root:root
 jail_copy() {   # jail_copy <program> [path in the jail]: the program and the libraries it loads
   local src dst lib
@@ -487,7 +487,11 @@ jail_copy /usr/bin/scp
 jail_copy "$SFTP_SERVER"
 mkd 755 "$FILES_JAIL/dev" root:root
 [[ -e "$FILES_JAIL/dev/null" ]] || mknod -m 666 "$FILES_JAIL/dev/null" c 1 3
-chown -R root:root "$FILES_JAIL/bin" "$FILES_JAIL/usr" "$FILES_JAIL/dev"
+# scp looks up its own user name: only the 'files' account is known inside the jail (no passwords in it)
+mkd 755 "$FILES_JAIL/etc" root:root
+printf 'root:x:0:0::/:/usr/sbin/nologin\n%s:x:%s:%s::/files:/bin/sh\n' "$FILES_USER" "$(id -u "$FILES_USER")" "$(id -g "$FILES_USER")" | put 644 "$FILES_JAIL/etc/passwd" root:root
+printf 'root:x:0:\n%s:x:%s:\n' "$FILES_USER" "$(id -g "$FILES_USER")" | put 644 "$FILES_JAIL/etc/group" root:root
+chown -R root:root "$FILES_JAIL/bin" "$FILES_JAIL/usr" "$FILES_JAIL/dev" "$FILES_JAIL/etc"
 [[ -d "$FILES_JAIL/lib" ]] && chown -R root:root "$FILES_JAIL/lib"
 [[ -d "$FILES_JAIL/lib64" ]] && chown -R root:root "$FILES_JAIL/lib64"
 mkd 755 "$FILES_JAIL/files" root:root
@@ -506,7 +510,7 @@ put 644 /etc/default/tftpd-hpa <<EOF
 TFTP_USERNAME="tftp"
 TFTP_DIRECTORY="${FILES_ROOT}"
 TFTP_ADDRESS=":69"
-TFTP_OPTIONS="--secure --create --umask 027 --verbose --map-file /etc/easygate-files.tftp-map"
+TFTP_OPTIONS="--secure --create --permissive --umask 027 --verbose --map-file /etc/easygate-files.tftp-map"
 EOF
 
 # HTTP: a plain file server with folder listing (like HFS), read-only, port set at each start.
