@@ -16,7 +16,7 @@
 #     --keep-packages  keep the wireguard-tools package installed
 # =============================================================================
 set -uo pipefail
-VERSION="0.2.5"
+VERSION="0.3.0"
 ADMIN_USER="easyadmin"
 ASSUME_YES=no; KEEP_USER=no; KEEP_PKGS=no
 
@@ -61,10 +61,11 @@ This removes the EasyGate configuration from $(hostname):
   - the tunnel watchdog (and its restart counter) and the wg-quick boot settings
   - the EasyGate firewall and NAT rules (the previous firewall is restored)
   - IP forwarding and the EasyGate SSH rules
+  - the file services (TFTP, HTTP, SFTP / SCP), the 'files' account and the files in /srv/easygate-files
 EOF
 if [[ "$KEEP_USER" == no ]]; then echo "  - the $ADMIN_USER account and its home folder"
 else echo "  - the SSH key and sudo rule of $ADMIN_USER (the account itself is kept)"; fi
-[[ "$KEEP_PKGS" == no ]] && echo "  - the wireguard-tools package"
+[[ "$KEEP_PKGS" == no ]] && echo "  - the wireguard-tools and tftpd-hpa packages"
 echo
 
 if [[ "$ASSUME_YES" == no ]]; then
@@ -90,6 +91,23 @@ remove_watchdog() {
   rm -rf /var/lib/easygate-gateway
 }
 step "Removed the tunnel watchdog and its restart counter" remove_watchdog
+
+# ---- 1b. File services (installer v0.3.0+): servers, account, jail, uploaded files ----
+remove_files() {
+  [[ -x /usr/local/sbin/easygate-files ]] && /usr/local/sbin/easygate-files stop >/dev/null 2>&1
+  systemctl disable --now easygate-files-reset.service easygate-files-http.service tftpd-hpa >/dev/null 2>&1 || true
+  if mountpoint -q /srv/easygate-sftp/files; then umount /srv/easygate-sftp/files || return 1; fi
+  sed -i '\#^/srv/easygate-files /srv/easygate-sftp/files #d' /etc/fstab
+  pkill -KILL -u files >/dev/null 2>&1 || true
+  id files >/dev/null 2>&1 && { userdel files 2>/dev/null || true; }
+  getent group files >/dev/null && { groupdel files 2>/dev/null || true; }
+  rm -rf /srv/easygate-sftp /srv/easygate-files
+  rm -f /etc/systemd/system/easygate-files-reset.service /etc/systemd/system/easygate-files-http.service \
+        /usr/local/sbin/easygate-files /etc/easygate-files.tftp-map /etc/ssh/sshd_config.d/85-easygate-files.conf
+  rm -rf /run/easygate-files
+  systemctl daemon-reload
+}
+[[ -e /usr/local/sbin/easygate-files || -d /srv/easygate-files ]] && step "Removed the file services (TFTP, HTTP, SFTP / SCP) and their files" remove_files
 
 # ---- 2. WireGuard tunnel ----------------------------------------------------
 remove_tunnel() {
@@ -191,7 +209,7 @@ fi
 remove_packages() {
   export DEBIAN_FRONTEND=noninteractive
   local pkgs=()
-  for p in wireguard-tools wireguard; do dpkg -s "$p" >/dev/null 2>&1 && pkgs+=("$p"); done
+  for p in wireguard-tools wireguard tftpd-hpa; do dpkg -s "$p" >/dev/null 2>&1 && pkgs+=("$p"); done
   [[ ${#pkgs[@]} -eq 0 ]] && return 0
   apt-get purge -y -q "${pkgs[@]}" >/dev/null
 }
