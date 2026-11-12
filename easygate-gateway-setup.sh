@@ -16,20 +16,24 @@
 #        [--approved "192.168.1.0/24 10.10.0.0/16"] \
 #        --admin-key "ssh-ed25519 AAAA... easygate-portal" \
 #        [--mgmt-from "10.0.0.0/24"] [--hostname easygate-gw-cust1] \
-#        [--no-mgmt-ssh] [--restart-after 180]
+#        [--no-mgmt-ssh] [--restart-after 180] [--tcp-port 443]
 #
 # --restart-after: restart the tunnel when the server has not answered for this
 # many seconds (90-3600, default 180; 0 = never). See section 8.
+# --tcp-port: TCP 443 fallback for sites that block UDP (default 443; 0 = off on
+# this gateway). Whether it may be used is decided on the server. See section 8a.
 #
 # At the end it prints an ENROLLMENT CODE (EG1....) to paste into the portal:
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.3.2"   # = the EasyGate server version (same number in both repositories)
+VERSION="0.4.0"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
 RESTART_AFTER=180
+TCP_PORT=443
+TCP_LOCAL=51820   # easygate-tcp listens on 127.0.0.1:$TCP_LOCAL (UDP) for wg0 (section 8a)
 PORT=""
 SERVER="easygate.easytech.com.cy"
 SERVER_ADDR=""
@@ -68,7 +72,7 @@ mkd() {   # mkd <mode> <dir> [owner:group]
   if [[ -n "${3:-}" ]]; then chown "$3" "$2"; fi
 }
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 # ---- Arguments --------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -83,6 +87,7 @@ while [[ $# -gt 0 ]]; do
     --admin-key)      ADMIN_KEYS+=("${2:-}"); shift 2 ;;
     --no-mgmt-ssh)    MGMT_SSH=no; shift ;;
     --restart-after)  RESTART_AFTER="${2:-}"; shift 2 ;;
+    --tcp-port)       TCP_PORT="${2:-}"; shift 2 ;;
     -h|--help)        usage ;;
     *)                die "unknown option: $1 (use --help)" ;;
   esac
@@ -115,6 +120,7 @@ fi
 [[ "$SERVER_PUBKEY" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw480]=$ ]] || die "--server-pubkey is not a WireGuard public key"
 [[ "$RESTART_AFTER" =~ ^[0-9]{1,4}$ ]] && (( RESTART_AFTER == 0 || (RESTART_AFTER >= 90 && RESTART_AFTER <= 3600) )) \
   || die "--restart-after must be 0 (never) or 90-3600 seconds"
+[[ "$TCP_PORT" =~ ^[0-9]{1,5}$ ]] && (( TCP_PORT <= 65535 )) || die "--tcp-port must be 0 (off) or 1-65535"
 [[ -z "$NEW_HOSTNAME" || "$NEW_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || die "--hostname invalid"
 for k in "${ADMIN_KEYS[@]}"; do
   [[ "$k" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}(\ [A-Za-z0-9@._-]{1,64})?$ ]] || die "--admin-key is not an ssh-ed25519 public key"
@@ -163,6 +169,7 @@ log "Server endpoint:  $SERVER:$PORT ${SERVER_ADDR:+($SERVER_ADDR) }(tenant $TEN
 log "Approved subnets: $APPROVED"
 log "Local management: $MGMT_SRCS"
 log "Mgmt SSH via VPN: $MGMT_SSH"
+log "TCP fallback:     $( (( TCP_PORT > 0 )) && echo "$SERVER:$TCP_PORT when UDP is blocked (if the server allows it)" || echo "off (--tcp-port 0)")"
 
 # ---- 1. Packages ------------------------------------------------------------
 log "Installing packages..."
@@ -357,17 +364,28 @@ put 755 /usr/local/sbin/easygate-watchdog <<'EOF'
 #  - No handshake for > RESTART_AFTER s: restart the tunnel. It comes back on a new UDP source port,
 #    so every firewall on the way builds a fresh session; a stale firewall session can otherwise
 #    block the old port for good. If a restart does not help, the wait doubles (up to 30 min).
+#  - TCP 443 fallback (installer v0.4.0, TCP_PORT > 0), for sites that block UDP:
+#      UDP silent for > 150 s     -> start easygate-tcp and point wg0 at it (127.0.0.1:TCP_LOCAL), no restart
+#      TCP silent for > 150 s     -> back to UDP (the server may not allow the fallback, or TCP is blocked too)
+#      TCP working for 30 min     -> probe UDP for up to 3 min, keeping the TCP connection; stay on UDP if it works.
+#                                    Packets the server sends through TCP meanwhile move wg0 back to it by themselves.
 # Every restart is counted in /var/lib/easygate-gateway/watchdog.state, which the portal reads.
 set -euo pipefail
-IF=wg0; CONF=/etc/wireguard/wg0.conf; UNIT=wg-quick@wg0
+IF=wg0; CONF=/etc/wireguard/wg0.conf; UNIT=wg-quick@wg0; TCP_UNIT=easygate-tcp
 STATE_DIR=/var/lib/easygate-gateway; STATE=$STATE_DIR/watchdog.state
 RESTART_AFTER=${RESTART_AFTER:-180}; MAX_WAIT=1800
+TCP_PORT=${TCP_PORT:-0}; TCP_LOCAL=${TCP_LOCAL:-51820}
+FALLBACK_AFTER=150; PROBE_EVERY=1800; PROBE_FOR=180
 [[ "$RESTART_AFTER" =~ ^[0-9]{1,4}$ ]] || RESTART_AFTER=180
+[[ "$TCP_PORT" =~ ^[0-9]{1,5}$ ]] || TCP_PORT=0
+[[ "$TCP_LOCAL" =~ ^[0-9]{4,5}$ ]] || TCP_LOCAL=51820
+RELAY="127.0.0.1:${TCP_LOCAL}"
 [[ -f "$CONF" ]] || exit 0
 ip link show "$IF" >/dev/null 2>&1 || exit 0            # down or failed: systemd retries wg-quick itself
 systemctl is-active --quiet easygate-upgrade && exit 0   # an installer run restarts the tunnel itself
 
 restarts=0; last_restart=0; last_reason=""; last_silence=0; fails=0
+transport=udp; switched=0; probe_at=0; fallbacks=0
 if [[ -r "$STATE" ]]; then
   while IFS='=' read -r k v; do
     case "$k" in
@@ -376,14 +394,18 @@ if [[ -r "$STATE" ]]; then
       last_reason)  if [[ "$v" =~ ^[a-z-]{1,40}$ ]]; then last_reason=$v; fi ;;
       last_silence) if [[ "$v" =~ ^[0-9]{1,9}$ ]]; then last_silence=$v; fi ;;
       fails)        if [[ "$v" =~ ^[0-9]{1,3}$ ]]; then fails=$v; fi ;;
+      transport)    if [[ "$v" == udp || "$v" == tcp ]]; then transport=$v; fi ;;
+      switched)     if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then switched=$v; fi ;;
+      probe_at)     if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then probe_at=$v; fi ;;
+      fallbacks)    if [[ "$v" =~ ^[0-9]{1,9}$ ]]; then fallbacks=$v; fi ;;
     esac
   done < "$STATE"
 fi
 save() {
   mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
   local tmp; tmp=$(mktemp "$STATE_DIR/.watchdog.XXXXXX")
-  printf 'restarts=%s\nlast_restart=%s\nlast_reason=%s\nlast_silence=%s\nfails=%s\n' \
-    "$restarts" "$last_restart" "$last_reason" "$last_silence" "$fails" > "$tmp"
+  printf 'restarts=%s\nlast_restart=%s\nlast_reason=%s\nlast_silence=%s\nfails=%s\ntransport=%s\nswitched=%s\nprobe_at=%s\nfallbacks=%s\n' \
+    "$restarts" "$last_restart" "$last_reason" "$last_silence" "$fails" "$transport" "$switched" "$probe_at" "$fallbacks" > "$tmp"
   chmod 644 "$tmp"; mv -f "$tmp" "$STATE"
 }
 [[ -f "$STATE" ]] || save
@@ -404,9 +426,63 @@ if (( LAST > last_restart && fails > 0 )); then fails=0; save; fi
 
 REF=$(( LAST > STARTED ? LAST : STARTED ))
 SILENCE=$(( NOW - REF ))
+
+# ---- TCP 443 fallback ----
+CUR=$(wg show "$IF" endpoints 2>/dev/null | awk -v p="$PEER" '$1==p{print $2}' || true)
+to_udp() {   # wg0 back to the server's UDP endpoint (re-resolves the name); the TCP client stops
+  wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
+  systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
+  transport=udp; switched=$NOW; probe_at=0; save
+}
+to_tcp() {
+  systemctl start "$TCP_UNIT" >/dev/null 2>&1 || { logger -t easygate-watchdog "TCP fallback: easygate-tcp did not start"; return 1; }
+  sleep 2   # the client connects first, so wg0's next packets find it
+  wg set "$IF" peer "$PEER" endpoint "$RELAY"
+  transport=tcp; switched=$NOW; probe_at=0; save
+}
+# the tunnel restarted (boot, installer, restart below): wg0 is on UDP again
+if [[ "$CUR" != "$RELAY" && $transport == tcp && $probe_at == 0 ]]; then
+  systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
+  transport=udp; switched=$NOW; save
+fi
+if (( TCP_PORT > 0 )); then
+  MODE_REF=$(( REF > switched ? REF : switched ))
+  MODE_SILENCE=$(( NOW - MODE_REF ))
+  if (( probe_at > 0 )); then
+    # probing UDP while on TCP
+    if [[ "$CUR" != "$RELAY" ]] && (( LAST > probe_at )); then
+      logger -t easygate-watchdog "UDP works again: leaving the TCP fallback"
+      to_udp; exit 0
+    elif [[ "$CUR" == "$RELAY" ]] || (( NOW - probe_at >= PROBE_FOR )); then
+      wg set "$IF" peer "$PEER" endpoint "$RELAY" 2>/dev/null || true
+      transport=tcp; switched=$NOW; probe_at=0; save
+      exit 0
+    fi
+    exit 0
+  elif [[ $transport == tcp ]]; then
+    if (( MODE_SILENCE > FALLBACK_AFTER )); then
+      logger -t easygate-watchdog "no reply over the TCP fallback for ${MODE_SILENCE}s either: trying UDP again"
+      to_udp   # then the restart rules below, as for UDP
+    elif (( NOW - switched >= PROBE_EVERY )); then
+      wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
+      probe_at=$NOW; save
+      exit 0
+    else
+      exit 0
+    fi
+  else
+    # on UDP and working: the TCP client is not needed
+    if (( SILENCE <= 135 )) && systemctl is-active --quiet "$TCP_UNIT"; then systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true; fi
+    if (( MODE_SILENCE > FALLBACK_AFTER )); then
+      logger -t easygate-watchdog "no reply over UDP for ${MODE_SILENCE}s: switching to the TCP fallback ($(awk -F: '{print $1}' <<<"$ENDPOINT"):${TCP_PORT})"
+      if to_tcp; then fallbacks=$(( fallbacks + 1 )); save; exit 0; fi
+    fi
+  fi
+fi
+
 (( SILENCE > 135 )) || exit 0
 
-wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true   # re-resolve the server name
+[[ $transport == udp ]] && { wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true; }   # re-resolve the server name
 
 (( RESTART_AFTER > 0 )) || exit 0
 WAIT=$RESTART_AFTER
@@ -417,6 +493,8 @@ if (( WAIT < RESTART_AFTER )); then WAIT=$RESTART_AFTER; fi
 
 restarts=$(( restarts + 1 )); fails=$(( fails + 1 )); last_restart=$NOW
 last_reason=no-handshake; last_silence=$(( LAST > 0 ? NOW - LAST : SILENCE ))
+systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
+transport=udp; switched=$NOW; probe_at=0
 save
 logger -t easygate-watchdog "no reply from the EasyGate server for ${SILENCE}s: restarting the tunnel (restart #${restarts}, next try after $(( WAIT * 2 > MAX_WAIT ? MAX_WAIT : WAIT * 2 ))s)"
 systemctl restart "$UNIT"
@@ -430,8 +508,140 @@ After=wg-quick@wg0.service
 [Service]
 Type=oneshot
 Environment=RESTART_AFTER=${RESTART_AFTER}
+Environment=TCP_PORT=${TCP_PORT}
+Environment=TCP_LOCAL=${TCP_LOCAL}
 ExecStart=/usr/local/sbin/easygate-watchdog
 EOF
+
+# ---- 8a. TCP 443 fallback client (installer v0.4.0) -------------------------
+# For sites that block outbound UDP. Started only by the watchdog when UDP gets no reply: it takes wg0's packets on
+# 127.0.0.1:${TCP_LOCAL} (UDP) and carries them inside TLS to ${SERVER}:${TCP_PORT}, where the EasyGate relay passes
+# them to this customer's WireGuard port. WireGuard still encrypts and authenticates everything; TLS only makes the
+# traffic look like HTTPS. The certificate is not checked on purpose (WireGuard proves the server; firewalls that
+# inspect TLS replace the certificate). The server decides whether this customer may use it, from its site IPs only.
+put 755 /usr/local/sbin/easygate-tcp <<'EOF'
+#!/usr/bin/env python3
+"""EasyGate TCP 443 fallback client: wg0 <-> UDP 127.0.0.1:EG_LOCAL <-> TLS EG_SERVER:EG_TCP_PORT (EasyGate relay)."""
+import asyncio, os, socket, ssl, struct, sys, time
+
+SERVER = os.environ.get("EG_SERVER", "")
+PORT = int(os.environ.get("EG_TCP_PORT", "443"))
+TENANT = int(os.environ.get("EG_TENANT", "0"))
+LOCAL = int(os.environ.get("EG_LOCAL", "51820"))
+MAX_FRAME = 2048          # WireGuard packets on a 1420-byte tunnel are ~1500 bytes
+MAX_BUFFER = 512 * 1024   # a stuck TCP connection drops packets instead of queuing them (WireGuard retries)
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+class Local(asyncio.DatagramProtocol):
+    """The UDP side: wg0 sends here; replies go back to the port wg0 used last."""
+    def __init__(self):
+        self.transport = None
+        self.wg = None
+        self.writer = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        self.wg = addr
+        w = self.writer
+        if w is None or not data or len(data) > MAX_FRAME or w.transport.get_write_buffer_size() > MAX_BUFFER:
+            return
+        w.write(struct.pack(">H", len(data)) + data)
+
+    def to_wg(self, data):
+        if self.wg is not None:
+            self.transport.sendto(data, self.wg)
+
+
+async def session(local):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.set_alpn_protocols(["http/1.1"])
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(SERVER, PORT, ssl=ctx, server_hostname=SERVER), 20)
+    sock = writer.get_extra_info("socket")
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for opt, val in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+        if hasattr(socket, opt):
+            sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+    writer.write(b"EGT1" + bytes([TENANT]))
+    await writer.drain()
+    log(f"connected to {SERVER}:{PORT} ({writer.get_extra_info('peername')[0]})")
+    local.writer = writer
+    try:
+        while True:
+            head = await reader.readexactly(2)
+            n = struct.unpack(">H", head)[0]
+            if n == 0 or n > MAX_FRAME:
+                raise ValueError(f"bad frame length {n}")
+            local.to_wg(await reader.readexactly(n))
+    finally:
+        local.writer = None
+        writer.close()
+
+
+async def main():
+    if not SERVER or not 1 <= TENANT <= 254 or not 1 <= PORT <= 65535:
+        log("EG_SERVER, EG_TCP_PORT and EG_TENANT must be set")
+        sys.exit(2)
+    loop = asyncio.get_running_loop()
+    _, local = await loop.create_datagram_endpoint(Local, local_addr=("127.0.0.1", LOCAL))
+    wait = 5
+    while True:
+        started = time.monotonic()
+        try:
+            await session(local)
+            log("the server closed the connection")
+        except asyncio.IncompleteReadError:
+            log(f"{SERVER}:{PORT}: closed by the server (TCP fallback not allowed for this customer or site IP, or switched off)")
+        except (OSError, asyncio.TimeoutError, ssl.SSLError, ValueError) as e:
+            log(f"{SERVER}:{PORT}: {type(e).__name__}: {e}")
+        if time.monotonic() - started > 60:
+            wait = 5
+        await asyncio.sleep(wait)
+        wait = min(wait * 2, 60)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+
+put 644 /etc/systemd/system/easygate-tcp.service <<EOF
+[Unit]
+Description=EasyGate - tunnel over TCP ${TCP_PORT} (started by the watchdog when UDP is blocked)
+After=network-online.target
+
+[Service]
+Environment=EG_SERVER=${SERVER}
+Environment=EG_TCP_PORT=${TCP_PORT}
+Environment=EG_TENANT=${TENANT_ID}
+Environment=EG_LOCAL=${TCP_LOCAL}
+ExecStart=/usr/bin/python3 /usr/local/sbin/easygate-tcp
+Restart=always
+RestartSec=5
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+EOF
+# never at boot: the watchdog starts it only when UDP gets no reply
+systemctl disable easygate-tcp >/dev/null 2>&1 || true
 
 put 644 /etc/systemd/system/easygate-watchdog.timer <<'EOF'
 [Unit]
@@ -657,6 +867,8 @@ systemctl enable easygate-files-reset.service >/dev/null 2>&1
 # ---- 9. Start tunnel --------------------------------------------------------
 log "Starting tunnel..."
 systemctl enable wg-quick@wg0 >/dev/null 2>&1
+# the tunnel starts on UDP; the watchdog switches to the TCP fallback again if UDP is still blocked
+systemctl stop easygate-tcp >/dev/null 2>&1 || true
 systemctl restart wg-quick@wg0
 systemctl enable --now easygate-watchdog.timer >/dev/null 2>&1
 if (( RESTART_AFTER > 0 )); then
@@ -724,6 +936,7 @@ cat <<EOF
  SSH host key:         $HOST_FP
  Time sync:            $TIME_SYNC
  Tunnel watchdog:      $( (( RESTART_AFTER > 0 )) && echo "restart after ${RESTART_AFTER}s without reply" || echo "off (re-resolve only)")
+ TCP fallback:         $( (( TCP_PORT > 0 )) && echo "TLS to $SERVER:$TCP_PORT when UDP is blocked (if the server allows it)" || echo "off")
 
  >>> Paste this ENROLLMENT CODE into the EasyGate portal <<<
      (customer page -> Setup instructions -> Paste the enrollment code)

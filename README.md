@@ -10,7 +10,7 @@ Always download a **tagged version** and check its SHA-256 against the value you
 from EasyTech before running it.
 
 ```bash
-VER=v0.3.2
+VER=v0.4.0
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-setup.sh"
 sha256sum easygate-gateway-setup.sh        # must match the published hash for ${VER}
 sudo bash easygate-gateway-setup.sh \
@@ -37,6 +37,16 @@ Options:
 | `--admin-key "ssh-ed25519 …"` | Public key allowed to manage the gateway over the VPN (the EasyGate portal's key); repeatable | required unless `--no-mgmt-ssh` |
 | `--no-mgmt-ssh` | Disable management SSH over the VPN | enabled |
 | `--restart-after <s>` | Restart the tunnel after this many seconds without reply from the server (90–3600, `0` = never); from v0.2.5 | `180` |
+| `--tcp-port <n>` | TCP 443 fallback for sites that block UDP: the server's public TCP port (`0` = off on this gateway); from v0.4.0 | `443` |
+
+## TCP 443 fallback (from v0.4.0)
+
+If outbound UDP is blocked at the site, the gateway carries the same WireGuard tunnel inside a TLS connection to the
+server (`--server`, port `--tcp-port`), which firewalls treat as normal HTTPS. WireGuard still encrypts and
+authenticates everything. The tunnel watchdog switches by itself: after about 2½ minutes without a reply over UDP it
+starts `easygate-tcp` and points the tunnel at it; every 30 minutes it checks whether UDP works again and goes back.
+Whether a customer may use the fallback is set on the EasyGate server (System → Settings and the customer page), and
+only from the customer's site IPs. Logs: `journalctl -u easygate-tcp -t easygate-watchdog`.
 
 At the end the script prints an **enrollment code** (`EG1.…`). Paste it into the EasyGate
 portal: it carries the gateway public key, the site public IP, the LAN and the gateway's SSH
@@ -75,7 +85,7 @@ Run it on the gateway console or over SSH from the LAN (not over the tunnel), lo
 with the site's own admin account:
 
 ```bash
-VER=v0.3.2
+VER=v0.4.0
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-remove.sh"
 sha256sum easygate-gateway-remove.sh       # must match the published hash for ${VER}
 sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
@@ -94,6 +104,7 @@ whose installer differs from the server.
 
 | Version | SHA-256 |
 |---|---|
+| v0.4.0 | `easygate-gateway-setup.sh` `3a25241f0d4071b107b5638e11713547ba3f83396fb2797e56dceeef977b52e4` — TCP 443 fallback for sites that block UDP (`--tcp-port`, `easygate-tcp`, watchdog switches automatically)<br>`easygate-gateway-remove.sh` `55873f18867f4fc878a3644da9041619f0a8b495675dcb9101348fa87a1a3045` — also removes the TCP fallback client |
 | v0.3.2 | `easygate-gateway-setup.sh` `7b540791613405cc6f18968f1bba5c793b918c84a4c6c90b3587506b1ee23349` — files stay on the gateway when the servers stop (Stop, auto-stop, reboot): they are deleted only from the portal<br>`easygate-gateway-remove.sh` `bfb65d0a38e1c54c30f25b4117619acd0fe68cf6510ff91a54e7b02cfbdfe0fb` — version number only |
 | v0.3.1 | `easygate-gateway-setup.sh` `e9832b69e62254f926319eb9dd08fd55bc2a6f714964e72ecebe072233c04f10` — file services for network devices: TFTP, HTTP and SFTP / SCP on the gateway, off until started in the portal (see above); same version number as the EasyGate server<br>`easygate-gateway-remove.sh` `bd4764af0655319bae6f6b8d070d007c5f0b340e14745106d033734aaa033382` — also removes the file services and their files |
 | v0.3.0 | not to be used: its SHA256SUMS still lists the v0.2.5 hashes, and TFTP uploads and SCP did not work. Use v0.3.1 |

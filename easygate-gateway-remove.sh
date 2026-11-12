@@ -16,7 +16,7 @@
 #     --keep-packages  keep the wireguard-tools package installed
 # =============================================================================
 set -uo pipefail
-VERSION="0.3.2"
+VERSION="0.4.0"
 ADMIN_USER="easyadmin"
 ASSUME_YES=no; KEEP_USER=no; KEEP_PKGS=no
 
@@ -58,7 +58,7 @@ cat <<EOF
 
 This removes the EasyGate configuration from $(hostname):
   - WireGuard tunnel wg0, its keys and /etc/wireguard (the gateway key is destroyed)
-  - the tunnel watchdog (and its restart counter) and the wg-quick boot settings
+  - the tunnel watchdog (and its restart counter), the TCP 443 fallback client and the wg-quick boot settings
   - the EasyGate firewall and NAT rules (the previous firewall is restored)
   - IP forwarding and the EasyGate SSH rules
   - the file services (TFTP, HTTP, SFTP / SCP), the 'files' account and the files in /srv/easygate-files
@@ -83,9 +83,10 @@ step() {  # step <description> <command...>: run, report, keep going on failure
 # ---- 1. Tunnel watchdog (and the re-resolve timer of installers up to v0.2.4) ----
 remove_watchdog() {
   systemctl disable --now easygate-watchdog.timer easygate-reresolve.timer >/dev/null 2>&1 || true
-  systemctl stop easygate-watchdog.service easygate-reresolve.service >/dev/null 2>&1 || true
+  systemctl stop easygate-watchdog.service easygate-reresolve.service easygate-tcp.service >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/easygate-watchdog.timer /etc/systemd/system/easygate-watchdog.service \
         /usr/local/sbin/easygate-watchdog \
+        /etc/systemd/system/easygate-tcp.service /usr/local/sbin/easygate-tcp \
         /etc/systemd/system/easygate-reresolve.timer /etc/systemd/system/easygate-reresolve.service \
         /usr/local/sbin/easygate-reresolve
   rm -rf /var/lib/easygate-gateway
