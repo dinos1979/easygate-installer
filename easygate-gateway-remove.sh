@@ -16,7 +16,7 @@
 #     --keep-packages  keep the wireguard-tools package installed
 # =============================================================================
 set -uo pipefail
-VERSION="0.4.2"
+VERSION="0.4.3"
 ADMIN_USER="easyadmin"
 ASSUME_YES=no; KEEP_USER=no; KEEP_PKGS=no
 

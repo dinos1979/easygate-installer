@@ -27,7 +27,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.4.2"   # = the EasyGate server version (same number in both repositories)
+VERSION="0.4.3"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -472,10 +472,19 @@ for _ in range(4):
 sys.exit(1)
 PY
 }
-# the tunnel restarted (boot, installer, restart below): wg0 is on UDP again
 if [[ "$CUR" != "$RELAY" && $transport == tcp ]]; then
-  systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
-  transport=udp; switched=$NOW; save
+  if (( STARTED > switched )); then
+    # the tunnel restarted (boot, installer, restart below): wg0 is on UDP again
+    systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
+    transport=udp; switched=$NOW; save
+  else
+    # (v0.4.3) Not restarted: a packet from the server came in over UDP and WireGuard moved the endpoint to it (roaming).
+    # One stray packet does not mean UDP works (the handshake reply may still be blocked): back to the TCP client.
+    logger -t easygate-watchdog "the tunnel endpoint moved off the TCP fallback to ${CUR:-none} (a packet from the server came in over UDP): pointing it back to TCP"
+    systemctl start "$TCP_UNIT" >/dev/null 2>&1 || true
+    wg set "$IF" peer "$PEER" endpoint "$RELAY" 2>/dev/null || true
+    CUR=$RELAY
+  fi
 fi
 if (( TCP_PORT > 0 )); then
   MODE_REF=$(( REF > switched ? REF : switched ))
