@@ -27,7 +27,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.4.1"   # = the EasyGate server version (same number in both repositories)
+VERSION="0.4.2"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -369,9 +369,11 @@ put 755 /usr/local/sbin/easygate-watchdog <<'EOF'
 #      TCP silent for > 150 s     -> back to UDP (the server may refuse the fallback, or TCP is blocked too); TCP is
 #                                    not tried again for 30 min (doubling up to 4 h), so UDP restarts get their turn
 #      on TCP for 30 min          -> check UDP: stop easygate-tcp (so nothing pulls wg0 back to it), point wg0 at the
-#                                    server's UDP port and ask the server's time over the tunnel (UDP 123 to .1, allowed
-#                                    by the server). An answer = UDP works: stay on it. None within ~12 s = back to TCP;
-#                                    the next check waits twice as long (up to 4 h).
+#                                    server's UDP port with a fresh session (v0.4.2: peer removed and loaded again, so a
+#                                    NEW handshake must complete over UDP) and ask the server's time over the tunnel
+#                                    (UDP 123 to .1, allowed by the server). An answer and a new handshake = UDP works:
+#                                    stay on it. Otherwise within ~12 s back to TCP; the next check waits twice as long
+#                                    (up to 4 h).
 # Every restart is counted in /var/lib/easygate-gateway/watchdog.state, which the portal reads.
 set -euo pipefail
 IF=wg0; CONF=/etc/wireguard/wg0.conf; UNIT=wg-quick@wg0; TCP_UNIT=easygate-tcp
@@ -488,8 +490,18 @@ if (( TCP_PORT > 0 )); then
     elif (( NOW - switched >= $(backoff $(( probe_fails + 1 ))) )); then
       # Check UDP. Stop the TCP client first: packets the server sends through it would move wg0 straight back.
       systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
-      wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
+      # Drop the current session (remove the peer, load it again from wg0.conf with the UDP endpoint): the
+      # check must make a NEW handshake over UDP. Some firewalls pass WireGuard data but drop the server's
+      # handshake reply; with the old session a reply came back, but the tunnel died at the next rekey.
+      PROBE_AT=$(date +%s)
+      wg set "$IF" peer "$PEER" remove 2>/dev/null || true
+      wg syncconf "$IF" <(wg-quick strip "$IF") 2>/dev/null || wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
+      HS_OK=0
       if server_answers; then
+        HS=$(wg show "$IF" latest-handshakes 2>/dev/null | awk -v p="$PEER" '$1==p{print $2}' || true)
+        [[ "$HS" =~ ^[0-9]{1,12}$ ]] && (( HS >= PROBE_AT )) && HS_OK=1
+      fi
+      if (( HS_OK )); then
         logger -t easygate-watchdog "UDP works again: leaving the TCP fallback"
         probe_fails=0; transport=udp; switched=$NOW; save
         exit 0
