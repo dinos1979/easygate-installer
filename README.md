@@ -10,7 +10,7 @@ Always download a **tagged version** and check its SHA-256 against the value you
 from EasyTech before running it.
 
 ```bash
-VER=v0.4.3
+VER=v0.4.4
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-setup.sh"
 sha256sum easygate-gateway-setup.sh        # must match the published hash for ${VER}
 sudo bash easygate-gateway-setup.sh \
@@ -44,7 +44,7 @@ Options:
 If outbound UDP is blocked at the site, the gateway carries the same WireGuard tunnel inside a TLS connection to the
 server (`--server`, port `--tcp-port`), which firewalls treat as normal HTTPS. WireGuard still encrypts and
 authenticates everything. The tunnel watchdog switches by itself: after about 2½ minutes without a reply over UDP it
-starts `easygate-tcp` and points the tunnel at it. UDP stays the first choice: after 30 minutes on TCP the gateway checks
+starts `easygate-tcp` and points the tunnel at it; right after a tunnel start (from v0.4.4) it checks UDP at once and switches within about 15 seconds. UDP stays the first choice: after 30 minutes on TCP the gateway checks
 UDP (it pauses the TCP connection, starts a fresh WireGuard session over UDP and asks the server's time, about 15 seconds
 without tunnel if UDP still fails) and stays on UDP only when a new handshake completes and the server answers; while UDP keeps failing the checks get rarer (1 h, 2 h, up to 4 h). If the
 server does not answer over TCP either (fallback switched off on the server), the gateway stays on UDP and does not try
@@ -89,7 +89,7 @@ Run it on the gateway console or over SSH from the LAN (not over the tunnel), lo
 with the site's own admin account:
 
 ```bash
-VER=v0.4.3
+VER=v0.4.4
 curl -fsSLO "https://raw.githubusercontent.com/dinos1979/easygate-installer/${VER}/easygate-gateway-remove.sh"
 sha256sum easygate-gateway-remove.sh       # must match the published hash for ${VER}
 sudo bash easygate-gateway-remove.sh       # asks you to type REMOVE
@@ -108,6 +108,7 @@ whose installer differs from the server.
 
 | Version | SHA-256 |
 |---|---|
+| v0.4.4 | `easygate-gateway-setup.sh` `bfe9446a5782873381fcf45a0333e0efc9366a42ff1cef736aad0307f3cc4723` — after every tunnel start (Restart tunnel in the portal, update, reboot) the gateway checks UDP at once (new handshake + server answer, about 15 s) and switches to the TCP fallback right away if UDP fails, instead of after 2½ minutes without reply<br>`easygate-gateway-remove.sh` `f507ac78248a03c22aeb16e6d96b9b8e1898bf0db4da6f1cb5e6386486d3acac` — version number only |
 | v0.4.3 | `easygate-gateway-setup.sh` `bc163f05adbbd335bb3285c2fb8c03744e3dd0768427967c029cc7eb20e386c5` — fix: a stray server packet over UDP no longer stops the TCP fallback (WireGuard moved the tunnel to it and the watchdog took that for a restart: about 3 minutes without tunnel); the tunnel is pointed back to TCP and the event is logged<br>`easygate-gateway-remove.sh` `9d003bb536ff5b3ce3353881470a7381d4f1d506b26611271397b5ff76160fb0` — version number only |
 | v0.4.2 | `easygate-gateway-setup.sh` `c2c219b294c121162444700aa5d63a261b25cbc32cfe3d28d6e7727ec09887d8` — fix: the UDP check now needs a new WireGuard handshake over UDP (some firewalls pass WireGuard data but drop the server's handshake reply: v0.4.1 then went back to UDP and lost the tunnel for about 3 minutes at every check)<br>`easygate-gateway-remove.sh` `ee0afd878807347bd806ec9c67ab31762a27d5528aa4f6ef40862d36d197eabc` — version number only |
 | v0.4.1 | `easygate-gateway-setup.sh` `46dc6453886a4b8b6f20e734360deb18b6bae4eb4520dd44fea4bca2dc370ce8` — fix: the gateway now really goes back to UDP when it works again (the v0.4.0 check never sent anything over UDP); checks get rarer while UDP keeps failing; when the server does not answer over TCP the gateway stays on UDP instead of switching back and forth<br>`easygate-gateway-remove.sh` `e49128e217661709f3ca12c11ef8a6c2851f9b4c34de64c8be5fdf4e65455830` — version number only |

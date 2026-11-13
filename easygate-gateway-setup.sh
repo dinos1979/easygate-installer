@@ -27,7 +27,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.4.3"   # = the EasyGate server version (same number in both repositories)
+VERSION="0.4.4"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -351,6 +351,8 @@ StartLimitIntervalSec=0
 [Service]
 Restart=on-failure
 RestartSec=30
+# v0.4.4: the watchdog checks UDP right after every tunnel start (TCP fallback within ~15 s if UDP fails)
+ExecStartPost=-/usr/bin/systemctl start --no-block easygate-watchdog.service
 EOF
 
 # Tunnel watchdog (replaces the re-resolve timer of installers up to v0.2.4).
@@ -374,6 +376,8 @@ put 755 /usr/local/sbin/easygate-watchdog <<'EOF'
 #                                    (UDP 123 to .1, allowed by the server). An answer and a new handshake = UDP works:
 #                                    stay on it. Otherwise within ~12 s back to TCP; the next check waits twice as long
 #                                    (up to 4 h).
+#      tunnel just started        -> (v0.4.4; wg-quick's ExecStartPost runs the watchdog at once) the same check right
+#                                    away: UDP fails -> TCP fallback within ~15 s instead of after 150 s of silence.
 # Every restart is counted in /var/lib/easygate-gateway/watchdog.state, which the portal reads.
 set -euo pipefail
 IF=wg0; CONF=/etc/wireguard/wg0.conf; UNIT=wg-quick@wg0; TCP_UNIT=easygate-tcp
@@ -390,7 +394,7 @@ ip link show "$IF" >/dev/null 2>&1 || exit 0            # down or failed: system
 systemctl is-active --quiet easygate-upgrade && exit 0   # an installer run restarts the tunnel itself
 
 restarts=0; last_restart=0; last_reason=""; last_silence=0; fails=0
-transport=udp; switched=0; fallbacks=0; probe_fails=0; tcp_fails=0; tcp_retry_at=0
+transport=udp; switched=0; fallbacks=0; probe_fails=0; tcp_fails=0; tcp_retry_at=0; start_checked=0
 if [[ -r "$STATE" ]]; then
   while IFS='=' read -r k v; do
     case "$k" in
@@ -405,15 +409,16 @@ if [[ -r "$STATE" ]]; then
       probe_fails)  if [[ "$v" =~ ^[0-9]{1,3}$ ]]; then probe_fails=$v; fi ;;
       tcp_fails)    if [[ "$v" =~ ^[0-9]{1,3}$ ]]; then tcp_fails=$v; fi ;;
       tcp_retry_at) if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then tcp_retry_at=$v; fi ;;
+      start_checked) if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then start_checked=$v; fi ;;
     esac
   done < "$STATE"
 fi
 save() {
   mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
   local tmp; tmp=$(mktemp "$STATE_DIR/.watchdog.XXXXXX")
-  printf 'restarts=%s\nlast_restart=%s\nlast_reason=%s\nlast_silence=%s\nfails=%s\ntransport=%s\nswitched=%s\nfallbacks=%s\nprobe_fails=%s\ntcp_fails=%s\ntcp_retry_at=%s\n' \
+  printf 'restarts=%s\nlast_restart=%s\nlast_reason=%s\nlast_silence=%s\nfails=%s\ntransport=%s\nswitched=%s\nfallbacks=%s\nprobe_fails=%s\ntcp_fails=%s\ntcp_retry_at=%s\nstart_checked=%s\n' \
     "$restarts" "$last_restart" "$last_reason" "$last_silence" "$fails" "$transport" "$switched" "$fallbacks" \
-    "$probe_fails" "$tcp_fails" "$tcp_retry_at" > "$tmp"
+    "$probe_fails" "$tcp_fails" "$tcp_retry_at" "$start_checked" > "$tmp"
   chmod 644 "$tmp"; mv -f "$tmp" "$STATE"
 }
 [[ -f "$STATE" ]] || save
@@ -427,7 +432,8 @@ LAST=$(wg show "$IF" latest-handshakes 2>/dev/null | awk -v p="$PEER" '$1==p{pri
 [[ "$LAST" =~ ^[0-9]{1,12}$ ]] || LAST=0
 # When the tunnel (re)started: counts as the start of the silence if there was no handshake since.
 STARTED=$(systemctl show --timestamp=unix -P ActiveEnterTimestamp "$UNIT" 2>/dev/null | tr -dc '0-9' || true)
-[[ "$STARTED" =~ ^[0-9]{1,12}$ ]] && (( STARTED > 0 )) || STARTED=$NOW
+STARTED_OK=1
+[[ "$STARTED" =~ ^[0-9]{1,12}$ ]] && (( STARTED > 0 )) || { STARTED=$NOW; STARTED_OK=0; }
 
 # A handshake after the last restart: the tunnel works, forget earlier failed attempts.
 if (( LAST > last_restart && fails > 0 )); then fails=0; save; fi
@@ -527,6 +533,27 @@ if (( TCP_PORT > 0 )); then
       exit 0
     fi
   else
+    # (v0.4.4) The tunnel has just (re)started (Restart tunnel in the portal, installer update, boot, restart below)
+    # and has had no handshake since: check UDP at once (a NEW handshake and the server's answer, ~15 s) instead of
+    # waiting 150 s of silence. UDP fails -> TCP fallback now; the UDP checks every 30 min (up to 4 h) bring it back.
+    # (wg0 is recreated at every start, so any handshake it shows is from this start; the 30 s margin covers a
+    #  handshake made while wg-quick was still starting, before systemd noted the start time)
+    if (( STARTED_OK && LAST < STARTED - 30 && start_checked != STARTED && NOW >= tcp_retry_at )); then
+      start_checked=$STARTED; save
+      if (( NOW - STARTED < 5 )); then sleep $(( 5 - (NOW - STARTED) )); fi   # give the first handshake a moment
+      HS_OK=0
+      if server_answers; then
+        HS=$(wg show "$IF" latest-handshakes 2>/dev/null | awk -v p="$PEER" '$1==p{print $2}' || true)
+        [[ "$HS" =~ ^[0-9]{1,12}$ ]] && (( HS >= STARTED - 30 )) && HS_OK=1
+      fi
+      if (( HS_OK )); then
+        logger -t easygate-watchdog "tunnel started: UDP works"
+        exit 0
+      fi
+      NOW=$(date +%s)
+      logger -t easygate-watchdog "tunnel started: no reply over UDP: switching to the TCP fallback ($(awk -F: '{print $1}' <<<"$ENDPOINT"):${TCP_PORT})"
+      if to_tcp; then fallbacks=$(( fallbacks + 1 )); probe_fails=0; save; server_answers || true; exit 0; fi
+    fi
     # on UDP and working: the TCP client is not needed
     if (( SILENCE <= 135 )) && systemctl is-active --quiet "$TCP_UNIT"; then systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true; fi
     if (( MODE_SILENCE > FALLBACK_AFTER && NOW >= tcp_retry_at )); then
