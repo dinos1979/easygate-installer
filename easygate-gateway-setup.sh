@@ -27,7 +27,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.4.0"   # = the EasyGate server version (same number in both repositories)
+VERSION="0.4.1"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -366,16 +366,19 @@ put 755 /usr/local/sbin/easygate-watchdog <<'EOF'
 #    block the old port for good. If a restart does not help, the wait doubles (up to 30 min).
 #  - TCP 443 fallback (installer v0.4.0, TCP_PORT > 0), for sites that block UDP:
 #      UDP silent for > 150 s     -> start easygate-tcp and point wg0 at it (127.0.0.1:TCP_LOCAL), no restart
-#      TCP silent for > 150 s     -> back to UDP (the server may not allow the fallback, or TCP is blocked too)
-#      TCP working for 30 min     -> probe UDP for up to 3 min, keeping the TCP connection; stay on UDP if it works.
-#                                    Packets the server sends through TCP meanwhile move wg0 back to it by themselves.
+#      TCP silent for > 150 s     -> back to UDP (the server may refuse the fallback, or TCP is blocked too); TCP is
+#                                    not tried again for 30 min (doubling up to 4 h), so UDP restarts get their turn
+#      on TCP for 30 min          -> check UDP: stop easygate-tcp (so nothing pulls wg0 back to it), point wg0 at the
+#                                    server's UDP port and ask the server's time over the tunnel (UDP 123 to .1, allowed
+#                                    by the server). An answer = UDP works: stay on it. None within ~12 s = back to TCP;
+#                                    the next check waits twice as long (up to 4 h).
 # Every restart is counted in /var/lib/easygate-gateway/watchdog.state, which the portal reads.
 set -euo pipefail
 IF=wg0; CONF=/etc/wireguard/wg0.conf; UNIT=wg-quick@wg0; TCP_UNIT=easygate-tcp
 STATE_DIR=/var/lib/easygate-gateway; STATE=$STATE_DIR/watchdog.state
 RESTART_AFTER=${RESTART_AFTER:-180}; MAX_WAIT=1800
 TCP_PORT=${TCP_PORT:-0}; TCP_LOCAL=${TCP_LOCAL:-51820}
-FALLBACK_AFTER=150; PROBE_EVERY=1800; PROBE_FOR=180
+FALLBACK_AFTER=150; PROBE_EVERY=1800; BACKOFF_MAX=14400
 [[ "$RESTART_AFTER" =~ ^[0-9]{1,4}$ ]] || RESTART_AFTER=180
 [[ "$TCP_PORT" =~ ^[0-9]{1,5}$ ]] || TCP_PORT=0
 [[ "$TCP_LOCAL" =~ ^[0-9]{4,5}$ ]] || TCP_LOCAL=51820
@@ -385,7 +388,7 @@ ip link show "$IF" >/dev/null 2>&1 || exit 0            # down or failed: system
 systemctl is-active --quiet easygate-upgrade && exit 0   # an installer run restarts the tunnel itself
 
 restarts=0; last_restart=0; last_reason=""; last_silence=0; fails=0
-transport=udp; switched=0; probe_at=0; fallbacks=0
+transport=udp; switched=0; fallbacks=0; probe_fails=0; tcp_fails=0; tcp_retry_at=0
 if [[ -r "$STATE" ]]; then
   while IFS='=' read -r k v; do
     case "$k" in
@@ -396,16 +399,19 @@ if [[ -r "$STATE" ]]; then
       fails)        if [[ "$v" =~ ^[0-9]{1,3}$ ]]; then fails=$v; fi ;;
       transport)    if [[ "$v" == udp || "$v" == tcp ]]; then transport=$v; fi ;;
       switched)     if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then switched=$v; fi ;;
-      probe_at)     if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then probe_at=$v; fi ;;
       fallbacks)    if [[ "$v" =~ ^[0-9]{1,9}$ ]]; then fallbacks=$v; fi ;;
+      probe_fails)  if [[ "$v" =~ ^[0-9]{1,3}$ ]]; then probe_fails=$v; fi ;;
+      tcp_fails)    if [[ "$v" =~ ^[0-9]{1,3}$ ]]; then tcp_fails=$v; fi ;;
+      tcp_retry_at) if [[ "$v" =~ ^[0-9]{1,12}$ ]]; then tcp_retry_at=$v; fi ;;
     esac
   done < "$STATE"
 fi
 save() {
   mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
   local tmp; tmp=$(mktemp "$STATE_DIR/.watchdog.XXXXXX")
-  printf 'restarts=%s\nlast_restart=%s\nlast_reason=%s\nlast_silence=%s\nfails=%s\ntransport=%s\nswitched=%s\nprobe_at=%s\nfallbacks=%s\n' \
-    "$restarts" "$last_restart" "$last_reason" "$last_silence" "$fails" "$transport" "$switched" "$probe_at" "$fallbacks" > "$tmp"
+  printf 'restarts=%s\nlast_restart=%s\nlast_reason=%s\nlast_silence=%s\nfails=%s\ntransport=%s\nswitched=%s\nfallbacks=%s\nprobe_fails=%s\ntcp_fails=%s\ntcp_retry_at=%s\n' \
+    "$restarts" "$last_restart" "$last_reason" "$last_silence" "$fails" "$transport" "$switched" "$fallbacks" \
+    "$probe_fails" "$tcp_fails" "$tcp_retry_at" > "$tmp"
   chmod 644 "$tmp"; mv -f "$tmp" "$STATE"
 }
 [[ -f "$STATE" ]] || save
@@ -430,42 +436,71 @@ SILENCE=$(( NOW - REF ))
 # ---- TCP 443 fallback ----
 CUR=$(wg show "$IF" endpoints 2>/dev/null | awk -v p="$PEER" '$1==p{print $2}' || true)
 to_udp() {   # wg0 back to the server's UDP endpoint (re-resolves the name); the TCP client stops
-  wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
   systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
-  transport=udp; switched=$NOW; probe_at=0; save
+  wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
+  transport=udp; switched=$NOW; save
 }
 to_tcp() {
   systemctl start "$TCP_UNIT" >/dev/null 2>&1 || { logger -t easygate-watchdog "TCP fallback: easygate-tcp did not start"; return 1; }
   sleep 2   # the client connects first, so wg0's next packets find it
   wg set "$IF" peer "$PEER" endpoint "$RELAY"
-  transport=tcp; switched=$NOW; probe_at=0; save
+  transport=tcp; switched=$NOW; save
+}
+backoff() {   # $1 = failures so far: 30 min, doubling, up to 4 h
+  local w=$PROBE_EVERY i
+  for (( i = 1; i < $1 && w < BACKOFF_MAX; i++ )); do w=$(( w * 2 )); done
+  echo $(( w > BACKOFF_MAX ? BACKOFF_MAX : w ))
+}
+# The server's tunnel address (.1 next to the gateway's .2) answers time queries from the gateway (UDP 123).
+GW_ADDR=$(awk '/^Address[ \t]*=/{sub(/^Address[ \t]*=[ \t]*/,""); sub(/\/.*/,""); print; exit}' "$CONF")
+SRV_TUN=""
+if [[ "$GW_ADDR" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\.([0-9]{1,3})$ ]] && (( BASH_REMATCH[2] > 0 )); then
+  SRV_TUN="${BASH_REMATCH[1]}.$(( BASH_REMATCH[2] - 1 ))"
+fi
+server_answers() {   # one NTP request through the tunnel, up to 4 tries of 3 s: 0 = the server answered
+  [[ -n "$SRV_TUN" ]] || return 1
+  python3 -I - "$SRV_TUN" >/dev/null 2>&1 <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
+for _ in range(4):
+    try:
+        s.sendto(b"\x1b" + bytes(47), (sys.argv[1], 123)); s.recvfrom(512); sys.exit(0)
+    except OSError:
+        pass
+sys.exit(1)
+PY
 }
 # the tunnel restarted (boot, installer, restart below): wg0 is on UDP again
-if [[ "$CUR" != "$RELAY" && $transport == tcp && $probe_at == 0 ]]; then
+if [[ "$CUR" != "$RELAY" && $transport == tcp ]]; then
   systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
   transport=udp; switched=$NOW; save
 fi
 if (( TCP_PORT > 0 )); then
   MODE_REF=$(( REF > switched ? REF : switched ))
   MODE_SILENCE=$(( NOW - MODE_REF ))
-  if (( probe_at > 0 )); then
-    # probing UDP while on TCP
-    if [[ "$CUR" != "$RELAY" ]] && (( LAST > probe_at )); then
-      logger -t easygate-watchdog "UDP works again: leaving the TCP fallback"
-      to_udp; exit 0
-    elif [[ "$CUR" == "$RELAY" ]] || (( NOW - probe_at >= PROBE_FOR )); then
-      wg set "$IF" peer "$PEER" endpoint "$RELAY" 2>/dev/null || true
-      transport=tcp; switched=$NOW; probe_at=0; save
-      exit 0
-    fi
-    exit 0
-  elif [[ $transport == tcp ]]; then
+  if [[ $transport == tcp ]]; then
+    # a handshake over TCP: the fallback works, forget earlier TCP failures
+    if (( LAST > switched && tcp_fails > 0 )); then tcp_fails=0; tcp_retry_at=0; save; fi
     if (( MODE_SILENCE > FALLBACK_AFTER )); then
-      logger -t easygate-watchdog "no reply over the TCP fallback for ${MODE_SILENCE}s either: trying UDP again"
+      tcp_fails=$(( tcp_fails + 1 )); tcp_retry_at=$(( NOW + $(backoff "$tcp_fails") ))
+      logger -t easygate-watchdog "no reply over the TCP fallback for ${MODE_SILENCE}s either (the server may not allow it): back to UDP, TCP not tried again for $(( tcp_retry_at - NOW ))s"
       to_udp   # then the restart rules below, as for UDP
-    elif (( NOW - switched >= PROBE_EVERY )); then
+    elif (( NOW - switched >= $(backoff $(( probe_fails + 1 ))) )); then
+      # Check UDP. Stop the TCP client first: packets the server sends through it would move wg0 straight back.
+      systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
       wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
-      probe_at=$NOW; save
+      if server_answers; then
+        logger -t easygate-watchdog "UDP works again: leaving the TCP fallback"
+        probe_fails=0; transport=udp; switched=$NOW; save
+        exit 0
+      fi
+      probe_fails=$(( probe_fails + 1 ))
+      if to_tcp; then
+        server_answers || true   # through TCP: the server moves back to the relay at once
+        logger -t easygate-watchdog "UDP still gets no reply: staying on the TCP fallback (next check in $(backoff $(( probe_fails + 1 )))s)"
+      else
+        transport=udp; switched=$NOW; save
+      fi
       exit 0
     else
       exit 0
@@ -473,9 +508,9 @@ if (( TCP_PORT > 0 )); then
   else
     # on UDP and working: the TCP client is not needed
     if (( SILENCE <= 135 )) && systemctl is-active --quiet "$TCP_UNIT"; then systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true; fi
-    if (( MODE_SILENCE > FALLBACK_AFTER )); then
+    if (( MODE_SILENCE > FALLBACK_AFTER && NOW >= tcp_retry_at )); then
       logger -t easygate-watchdog "no reply over UDP for ${MODE_SILENCE}s: switching to the TCP fallback ($(awk -F: '{print $1}' <<<"$ENDPOINT"):${TCP_PORT})"
-      if to_tcp; then fallbacks=$(( fallbacks + 1 )); save; exit 0; fi
+      if to_tcp; then fallbacks=$(( fallbacks + 1 )); probe_fails=0; save; exit 0; fi
     fi
   fi
 fi
@@ -494,7 +529,7 @@ if (( WAIT < RESTART_AFTER )); then WAIT=$RESTART_AFTER; fi
 restarts=$(( restarts + 1 )); fails=$(( fails + 1 )); last_restart=$NOW
 last_reason=no-handshake; last_silence=$(( LAST > 0 ? NOW - LAST : SILENCE ))
 systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
-transport=udp; switched=$NOW; probe_at=0
+transport=udp; switched=$NOW
 save
 logger -t easygate-watchdog "no reply from the EasyGate server for ${SILENCE}s: restarting the tunnel (restart #${restarts}, next try after $(( WAIT * 2 > MAX_WAIT ? MAX_WAIT : WAIT * 2 ))s)"
 systemctl restart "$UNIT"
