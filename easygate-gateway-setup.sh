@@ -34,7 +34,7 @@
 # it carries the gateway WireGuard key, site IP, LAN and the SSH host key.
 # =============================================================================
 set -euo pipefail
-VERSION="0.4.5"   # = the EasyGate server version (same number in both repositories)
+VERSION="0.4.6"   # = the EasyGate server version (same number in both repositories)
 
 # ---- Defaults ---------------------------------------------------------------
 TENANT_ID=1
@@ -453,7 +453,11 @@ save() {
 # (keys end in '=', so strip the "Name = " prefix instead of splitting on '=')
 PEER=$(awk '/^PublicKey[ \t]*=/{sub(/^PublicKey[ \t]*=[ \t]*/,""); print; exit}' "$CONF")
 ENDPOINT=$(awk '/^Endpoint[ \t]*=/{sub(/^Endpoint[ \t]*=[ \t]*/,""); print; exit}' "$CONF")
-[[ -n "$PEER" && -n "$ENDPOINT" ]] || exit 0
+ALLOWED=$(awk '/^AllowedIPs[ \t]*=/{sub(/^AllowedIPs[ \t]*=[ \t]*/,""); gsub(/[ \t]/,""); print; exit}' "$CONF")
+KEEPALIVE=$(awk '/^PersistentKeepalive[ \t]*=/{sub(/^PersistentKeepalive[ \t]*=[ \t]*/,""); print; exit}' "$CONF")
+[[ "$KEEPALIVE" =~ ^[0-9]{1,5}$ ]] || KEEPALIVE=25
+KEY_FILE=/etc/wireguard/gw.key
+[[ -n "$PEER" && -n "$ENDPOINT" && -n "$ALLOWED" ]] || exit 0
 NOW=$(date +%s)
 LAST=$(wg show "$IF" latest-handshakes 2>/dev/null | awk -v p="$PEER" '$1==p{print $2}' || true)
 [[ "$LAST" =~ ^[0-9]{1,12}$ ]] || LAST=0
@@ -481,7 +485,14 @@ back_to_udp() {   # TCP client off, wg0 on the server's UDP endpoint (re-resolve
 fresh_udp() {   # drop the current session: remove the peer and load it again from wg0.conf (UDP endpoint)
   systemctl stop "$TCP_UNIT" >/dev/null 2>&1 || true
   wg set "$IF" peer "$PEER" remove 2>/dev/null || true
-  wg syncconf "$IF" <(wg-quick strip "$IF") 2>/dev/null || wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" 2>/dev/null || true
+  # addconf, never syncconf: wg0.conf holds no PrivateKey (PostUp sets it from gw.key), and syncconf takes a missing
+  # PrivateKey as "no key" - wg0 then cannot send at all until the next restart (v0.4.5 bug: every UDP check cut the
+  # tunnel for minutes). The fallback re-adds the peer with everything it needs, not only its endpoint.
+  wg addconf "$IF" <(wg-quick strip "$IF") 2>/dev/null \
+    || wg set "$IF" peer "$PEER" endpoint "$ENDPOINT" allowed-ips "$ALLOWED" persistent-keepalive "$KEEPALIVE" 2>/dev/null || true
+  if [[ -r "$KEY_FILE" ]] && ! wg show "$IF" private-key 2>/dev/null | grep -q '^[A-Za-z0-9+/]\{43\}=$'; then
+    wg set "$IF" private-key "$KEY_FILE" 2>/dev/null || true   # never leave wg0 without its key
+  fi
 }
 retry_wait() {   # $1 = failed tries in a row: RETRY_EVERY for the first RETRY_COUNT, RETRY_THEN for the next RETRY_COUNT, then RETRY_LAST
   if (( $1 <= RETRY_COUNT )); then echo "$RETRY_EVERY"; elif (( $1 <= 2 * RETRY_COUNT )); then echo "$RETRY_THEN"; else echo "$RETRY_LAST"; fi
